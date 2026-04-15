@@ -11,7 +11,10 @@
   "plugins": [
     {
       "name": "ashlr",
-      "source": ".",
+      "source": {
+        "source": "github",
+        "repo": "masonwyatt23/ashlr-plugin"
+      },
       "description": "Token-efficient file tools for Claude Code — open-source WOZCODE alternative. Mean −79.5% savings on files ≥ 2 KB.",
       "version": "0.3.0",
       "author": {
@@ -19,6 +22,7 @@
         "url": "https://github.com/masonwyatt23"
       },
       "homepage": "https://plugin.ashlr.ai/",
+      "repository": "https://github.com/masonwyatt23/ashlr-plugin",
       "license": "MIT",
       "category": "token-efficiency",
       "keywords": ["claude-code", "mcp", "token-efficiency", "wozcode-alternative"]
