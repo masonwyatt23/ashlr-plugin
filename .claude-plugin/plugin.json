@@ -1,13 +1,13 @@
 {
   "name": "ashlr",
-  "displayName": "AshlrCode Efficiency",
   "version": "0.3.0",
-  "description": "Open-source Claude Code plugin that cuts token usage via genome-aware retrieval + 3-tier context compression + provider-aware budgeting. Powered by @ashlr/core-efficiency.",
-  "author": "Mason Wyatt",
-  "license": "MIT",
+  "description": "Open-source Claude Code plugin — token-efficient Read/Grep/Edit/SQL/Bash + hooks + status line + tri-agent delegation. WOZCODE alternative, MIT, zero telemetry.",
+  "author": {
+    "name": "Mason Wyatt",
+    "url": "https://github.com/masonwyatt23"
+  },
+  "homepage": "https://plugin.ashlr.ai/",
   "repository": "https://github.com/masonwyatt23/ashlr-plugin",
-  "keywords": ["claude-code", "plugin", "token-efficiency", "ashlrcode"],
-  "claudeCode": {
-    "minVersion": "1.0.0"
-  }
+  "license": "MIT",
+  "keywords": ["claude-code", "plugin", "token-efficiency", "mcp", "ashlrcode", "wozcode-alternative"]
 }
