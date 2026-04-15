@@ -1,10 +1,10 @@
 {
   "name": "ashlr",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Open-source Claude Code plugin \u2014 token-efficient Read/Grep/Edit/SQL/Bash/Tree/HTTP/Diff/Logs + hooks + status line + tri-agent delegation + active genome scribe loop. MIT, zero telemetry.",
   "author": {
     "name": "Mason Wyatt",
-    "url": "https://github.com/masonwyatt23"
+    "url": "https://github.com/ashlrai"
   },
   "homepage": "https://plugin.ashlr.ai/",
   "repository": "https://github.com/ashlrai/ashlr-plugin",

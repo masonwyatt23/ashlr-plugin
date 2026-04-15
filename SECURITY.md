@@ -2,7 +2,7 @@
 
 ## Reporting
 
-If you've found a vulnerability in ashlr-plugin or `@ashlr/core-efficiency`, please email **masonwyatt23@users.noreply.github.com** with details. Do not open a public GitHub issue for vulnerabilities.
+If you've found a vulnerability in ashlr-plugin or `@ashlr/core-efficiency`, please email **security@ashlr.ai** with details. Do not open a public GitHub issue for vulnerabilities.
 
 Expect a reply within 72 hours.
 

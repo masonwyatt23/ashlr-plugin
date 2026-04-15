@@ -72,7 +72,7 @@ echo
 # --- 4. Report final URLs ---
 green "Done."
 echo "  Plugin repo:        https://github.com/$USER/ashlr-plugin"
-echo "  Landing page:       https://$USER.github.io/ashlr-plugin/"
+echo "  Landing page:       https://plugin.ashlr.ai/"
 echo "  Core library repo:  https://github.com/$USER/ashlr-core-efficiency"
 echo
 yellow "Install inside Claude Code:"
