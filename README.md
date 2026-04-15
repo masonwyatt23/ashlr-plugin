@@ -39,29 +39,74 @@ Plus a **status-line integration** (`scripts/savings-status-line.ts`) that shows
 
 ## Install
 
-### Prerequisites
-- [bun](https://bun.sh) ≥ 1.3 on your PATH (the MCP server runs under bun)
+**Prerequisites:** [bun](https://bun.sh) ≥ 1.3 and Claude Code. No account, no API key.
 
-### In Claude Code
+### 🪄 Fastest — one-liner
+
+```bash
+curl -fsSL plugin.ashlr.ai/install.sh | bash
+```
+
+Then inside Claude Code:
 
 ```
 /plugin marketplace add masonwyatt23/ashlr-plugin
 /plugin install ashlr@ashlr-marketplace
 ```
 
-### One-time setup after install
+Restart Claude Code. Done.
 
-Claude Code clones the plugin but does not run `bun install` for you. Do it once:
+### 🧠 Ask Claude Code to do it
 
-```bash
-# Path may differ by Claude Code version — run `/plugin list` to see it
-cd ~/.claude/plugins/ashlr-plugin
-bun install
+Copy and paste this into any Claude Code session:
+
+```
+Install the ashlr-plugin for me:
+
+1. Run in a terminal:
+   curl -fsSL plugin.ashlr.ai/install.sh | bash
+
+2. Then inside this session, run these two slash commands:
+   /plugin marketplace add masonwyatt23/ashlr-plugin
+   /plugin install ashlr@ashlr-marketplace
+
+3. Restart this Claude Code session, then verify:
+   /ashlr-status
 ```
 
-Then restart your Claude Code session. Look for **`ashlr:code`** on the right side of the input field — that badge means the MCP server connected.
+Claude Code runs the shell command, then the slash commands, then asks you to restart.
 
-If the badge doesn't appear, run `/ashlr-status` — it reports MCP health and tells you what's missing.
+### 🔨 Fully manual (if you want to see every step)
+
+```bash
+# 1. Clone to Claude Code's plugin cache
+git clone https://github.com/masonwyatt23/ashlr-plugin \
+  ~/.claude/plugins/cache/ashlr-marketplace/ashlr
+
+# 2. Install MCP deps (or skip — the SessionStart hook auto-installs on first run)
+cd ~/.claude/plugins/cache/ashlr-marketplace/ashlr && bun install
+
+# 3. Inside Claude Code
+#   /plugin marketplace add masonwyatt23/ashlr-plugin
+#   /plugin install ashlr@ashlr-marketplace
+
+# 4. Restart Claude Code, then verify
+#   /ashlr-status
+```
+
+### Verify it's working
+
+Look for **`ashlr:code`** on the right side of the input field — that's the badge confirming the MCP server connected. Or run:
+
+```
+/ashlr-status     # plugin health + core library version + genome detection
+/ashlr-savings    # running token-savings total
+/ashlr-benchmark  # benchmark against your current project
+```
+
+### About the auto-install
+
+Since v0.3.0, the `SessionStart` hook detects a missing `node_modules/` and runs `bun install` transparently on first session load. You shouldn't need to `bun install` yourself.
 
 ## Commands
 

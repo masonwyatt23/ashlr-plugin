@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# ashlr-plugin one-liner installer.
+#
+# Usage:
+#   curl -fsSL https://plugin.ashlr.ai/install.sh | bash
+#
+# What it does (idempotent — safe to re-run):
+#   1. Checks bun is installed (links to install if missing)
+#   2. Clones the plugin repo into Claude Code's marketplace cache
+#   3. Runs `bun install` so MCP servers have their deps
+#   4. Tells you the exact two slash-commands to run inside Claude Code
+#
+# Does NOT modify your Claude Code settings.json. Does NOT install globally.
+# Everything lives in ~/.claude/plugins/cache/.
+
+set -euo pipefail
+
+cyan()   { printf "\033[36m%s\033[0m\n" "$*"; }
+green()  { printf "\033[32m%s\033[0m\n" "$*"; }
+yellow() { printf "\033[33m%s\033[0m\n" "$*"; }
+red()    { printf "\033[31m%s\033[0m\n" "$*"; }
+
+cyan "ashlr-plugin installer · github.com/masonwyatt23/ashlr-plugin"
+echo
+
+# 1. Prerequisite: bun
+if ! command -v bun >/dev/null 2>&1; then
+  red "✗ bun is not installed."
+  echo "  Install it first: https://bun.sh  (curl -fsSL https://bun.sh/install | bash)"
+  echo "  ashlr-plugin's MCP servers run under bun."
+  exit 1
+fi
+green "✓ bun $(bun --version)"
+
+# 2. Prerequisite: git + gh or raw clone access
+if ! command -v git >/dev/null 2>&1; then
+  red "✗ git is not installed."
+  exit 1
+fi
+green "✓ git $(git --version | awk '{print $3}')"
+
+# 3. Pre-clone into Claude Code's cache dir so /plugin install is instant
+CACHE_DIR="$HOME/.claude/plugins/cache/ashlr-marketplace/ashlr"
+mkdir -p "$(dirname "$CACHE_DIR")"
+
+if [ -d "$CACHE_DIR/.git" ]; then
+  yellow "→ Cache exists — updating"
+  git -C "$CACHE_DIR" fetch --quiet origin main
+  git -C "$CACHE_DIR" reset --quiet --hard origin/main
+else
+  yellow "→ Cloning plugin to $CACHE_DIR"
+  git clone --quiet https://github.com/masonwyatt23/ashlr-plugin.git "$CACHE_DIR"
+fi
+green "✓ plugin at: $CACHE_DIR"
+
+# 4. Install dependencies
+yellow "→ Installing dependencies (bun install)"
+(cd "$CACHE_DIR" && bun install --silent 2>&1 | tail -5 || true)
+green "✓ dependencies installed"
+
+echo
+cyan "Done. Next steps — inside Claude Code:"
+echo
+echo "  /plugin marketplace add masonwyatt23/ashlr-plugin"
+echo "  /plugin install ashlr@ashlr-marketplace"
+echo
+echo "Then restart Claude Code. The baseline scanner runs on session start,"
+echo "the tool-redirect hook fires on Read/Grep/Edit, and /ashlr-savings"
+echo "shows totals."
+echo
+cyan "Landing page: https://plugin.ashlr.ai/"
+cyan "Source:       https://github.com/masonwyatt23/ashlr-plugin"

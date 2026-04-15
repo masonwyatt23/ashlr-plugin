@@ -25,12 +25,47 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { spawnSync } from "child_process";
 
 import { formatBaseline, scan } from "../scripts/baseline-scan";
 
 export const ACTIVATION_NOTICE =
-  "ashlr-plugin v0.2.0 active — ashlr__read / ashlr__grep / ashlr__edit available. /ashlr-savings to see totals.";
+  "ashlr-plugin v0.3.0 active — ashlr__read / ashlr__grep / ashlr__edit / ashlr__sql / ashlr__bash available. /ashlr-savings to see totals.";
 export const SCAN_BUDGET_MS = 2000;
+
+/**
+ * Ensure the plugin's dependencies are installed.
+ * Claude Code clones the plugin but does not run `bun install`, so on first
+ * session we detect the missing node_modules and bootstrap them silently.
+ * Idempotent: no-op when deps are already present.
+ *
+ * Runs in the background so the SessionStart hook never blocks the agent.
+ */
+export function ensureDepsInstalled(pluginRoot?: string): void {
+  const root = pluginRoot ?? (process.env.CLAUDE_PLUGIN_ROOT || join(import.meta.dir, ".."));
+  if (existsSync(join(root, "node_modules", "@modelcontextprotocol", "sdk"))) return;
+  // Fire-and-forget: we don't want to block the hook, but we do want to report.
+  try {
+    const res = spawnSync("bun", ["install"], {
+      cwd: root,
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 60_000,
+      env: { ...process.env, CI: "1" },
+    });
+    if (res.status === 0) {
+      process.stderr.write("[ashlr] first-run: dependencies installed.\n");
+    } else {
+      process.stderr.write(
+        "[ashlr] dependencies missing and auto-install failed. Run manually: " +
+          `cd "${root}" && bun install\n`,
+      );
+    }
+  } catch {
+    process.stderr.write(
+      `[ashlr] dependencies missing. Run: cd "${root}" && bun install\n`,
+    );
+  }
+}
 
 interface HookOutput {
   hookSpecificOutput: {
@@ -110,6 +145,9 @@ export function buildResponse(opts: BuildOpts = {}): BuildResult {
 }
 
 async function main(): Promise<void> {
+  // First-run: bootstrap dependencies if missing. Silent no-op otherwise.
+  ensureDepsInstalled();
+
   // Drain stdin (Claude Code passes hook input as JSON) but we don't need it.
   try {
     // Best-effort, non-blocking-ish: only attempt if stdin is a pipe.
