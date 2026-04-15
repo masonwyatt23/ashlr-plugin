@@ -10,23 +10,35 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out ashlr-plugin (into subdir so sibling can live next to it)
+        uses: actions/checkout@v4
+        with:
+          path: ashlr-plugin
 
-      - name: Check out @ashlr/core-efficiency (sibling dep)
+      - name: Check out @ashlr/core-efficiency sibling
         uses: actions/checkout@v4
         with:
           repository: masonwyatt23/ashlr-core-efficiency
-          path: ../ashlr-core-efficiency
-          # CI-only — public repo, no token needed
+          path: ashlr-core-efficiency
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Install deps
-        run: bun install --frozen-lockfile
+      - name: Install core-efficiency deps
+        working-directory: ashlr-core-efficiency
+        run: bun install
 
-      - name: Typecheck
+      - name: Install plugin deps
+        working-directory: ashlr-plugin
+        run: bun install
+
+      - name: Typecheck plugin
+        working-directory: ashlr-plugin
+        run: bunx tsc --noEmit
+
+      - name: Typecheck core-efficiency
+        working-directory: ashlr-core-efficiency
         run: bunx tsc --noEmit
 
   smoke:
@@ -34,35 +46,42 @@ jobs:
     needs: typecheck
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: ashlr-plugin
       - uses: actions/checkout@v4
         with:
           repository: masonwyatt23/ashlr-core-efficiency
-          path: ../ashlr-core-efficiency
+          path: ashlr-core-efficiency
       - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
 
-      - name: MCP server initialize + tools/list
+      - name: Install
+        working-directory: ashlr-plugin
+        run: bun install
+
+      - name: MCP server responds to initialize + tools/list
+        working-directory: ashlr-plugin
         run: |
           printf '%s\n%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-            | bun run servers/efficiency-server.ts \
-            | tee /tmp/mcp.out
+            | bun run servers/efficiency-server.ts > /tmp/mcp.out
           grep -q '"name":"ashlr__read"' /tmp/mcp.out
           grep -q '"name":"ashlr__grep"' /tmp/mcp.out
           grep -q '"name":"ashlr__edit"' /tmp/mcp.out
           grep -q '"name":"ashlr__savings"' /tmp/mcp.out
+          echo "✓ all 4 MCP tools registered"
 
-      - name: Bench smoke
-        run: bun run servers/bench.ts --dir ../ashlr-core-efficiency/src --json > /tmp/bench.json
-        continue-on-error: true
+      - name: Bench smoke (non-fatal — reports savings)
+        working-directory: ashlr-plugin
+        run: bun run servers/bench.ts --dir ../ashlr-core-efficiency/src/genome || true
 
   pages:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       pages: write
       id-token: write
+      contents: read
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
