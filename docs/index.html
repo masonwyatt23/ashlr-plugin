@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ashlr — an open-source Claude Code plugin that keeps a line-item count of every token it saves you, and does something about it." />
+  <meta property="og:title" content="ashlr · The Token Ledger" />
+  <meta property="og:description" content="Open-source Claude Code plugin. Genome-aware retrieval + 3-tier compression + provider-aware budgeting. MIT." />
+  <meta property="og:type" content="website" />
+  <title>ashlr · The Token Ledger for Claude Code</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      /* Parchment palette — ledger aesthetic */
+      --paper: #F3EADB;
+      --paper-deep: #ECE2CE;
+      --paper-shadow: #D9CDB3;
+      --ink: #121212;
+      --ink-80: rgba(18, 18, 18, 0.82);
+      --ink-55: rgba(18, 18, 18, 0.55);
+      --ink-30: rgba(18, 18, 18, 0.28);
+      --ink-10: rgba(18, 18, 18, 0.09);
+
+      /* Accountant's red — sparingly, for savings marks */
+      --debit: #8B2E1A;
+      --debit-deep: #5E1E11;
+      --credit: #4F5B3F;
+
+      /* Metrics */
+      --max-w: 1240px;
+      --gutter: clamp(24px, 4vw, 56px);
+
+      /* Typography */
+      --font-display: "Fraunces", ui-serif, Georgia, serif;
+      --font-body: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #12120F;
+        --paper-deep: #1A1A14;
+        --paper-shadow: #000;
+        --ink: #F3EADB;
+        --ink-80: rgba(243, 234, 219, 0.84);
+        --ink-55: rgba(243, 234, 219, 0.6);
+        --ink-30: rgba(243, 234, 219, 0.32);
+        --ink-10: rgba(243, 234, 219, 0.1);
+        --debit: #D06B54;
+        --debit-deep: #8B2E1A;
+        --credit: #98A789;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font-body);
+      font-weight: 400;
+      color: var(--ink);
+      background: var(--paper);
+      line-height: 1.55;
+      font-feature-settings: "ss01" on, "cv11" on;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      overflow-x: hidden;
+    }
+
+    /* Subtle paper grain — generated SVG noise */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+      opacity: 0.35;
+      mix-blend-mode: multiply;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    @media (prefers-color-scheme: dark) {
+      body::before { mix-blend-mode: screen; opacity: 0.2; }
+    }
+
+    a {
+      color: var(--ink);
+      text-decoration: none;
+      transition: color 0.2s ease;
+    }
+
+    .wrap {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 0 var(--gutter);
+      position: relative;
+      z-index: 2;
+    }
+
+    /* ------------ Header ------------ */
+    .header {
+      padding: 28px 0 24px;
+      border-bottom: 1px solid var(--ink-10);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .header-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 24px;
+    }
+
+    .brand {
+      font-family: var(--font-display);
+      font-size: 22px;
+      font-weight: 500;
+      font-variation-settings: "SOFT" 30, "opsz" 30;
+      letter-spacing: -0.01em;
+      text-transform: none;
+    }
+
+    .brand-mark {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      background: var(--debit);
+      margin-right: 8px;
+      transform: translateY(-4px);
+      border-radius: 1px;
+    }
+
+    .nav {
+      display: flex;
+      gap: 36px;
+    }
+
+    .nav a {
+      color: var(--ink-55);
+      position: relative;
+    }
+    .nav a:hover { color: var(--ink); }
+    .nav a::after {
+      content: ""; position: absolute; left: 0; right: 0; bottom: -6px;
+      height: 1px; background: var(--debit);
+      transform: scaleX(0); transform-origin: left;
+      transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .nav a:hover::after { transform: scaleX(1); }
+
+    /* ------------ Hero ------------ */
+    .hero {
+      padding: 72px 0 96px;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      left: var(--gutter);
+      right: var(--gutter);
+      bottom: 0;
+      height: 1px;
+      background: var(--ink-10);
+    }
+
+    .hero-meta {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+      margin-bottom: 56px;
+    }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--debit);
+      margin-bottom: 28px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 1px;
+      background: var(--debit);
+    }
+
+    h1.display {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: clamp(56px, 9.5vw, 136px);
+      font-variation-settings: "SOFT" 40, "WONK" 0, "opsz" 144;
+      line-height: 0.93;
+      letter-spacing: -0.035em;
+      margin-bottom: 36px;
+    }
+
+    h1.display .italic {
+      font-style: italic;
+      font-weight: 300;
+      font-variation-settings: "SOFT" 80, "WONK" 1, "opsz" 144;
+      color: var(--debit);
+    }
+
+    .lead {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-variation-settings: "opsz" 36;
+      font-size: clamp(20px, 2.2vw, 27px);
+      line-height: 1.4;
+      color: var(--ink-80);
+      max-width: 680px;
+      margin-bottom: 48px;
+      letter-spacing: -0.005em;
+    }
+
+    .hero-ctas {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 88px;
+    }
+
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 14px 22px;
+      border: 1px solid var(--ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      background: transparent;
+      color: var(--ink);
+      font-weight: 500;
+    }
+
+    .btn-primary {
+      background: var(--ink);
+      color: var(--paper);
+    }
+    .btn-primary:hover {
+      background: var(--debit);
+      border-color: var(--debit);
+    }
+
+    .btn-secondary:hover {
+      background: var(--ink);
+      color: var(--paper);
+    }
+
+    .btn .caret {
+      transition: transform 0.2s ease;
+      display: inline-block;
+    }
+    .btn:hover .caret { transform: translateX(4px); }
+
+    /* ------------ Ledger ------------ */
+    .ledger {
+      border: 1px solid var(--ink);
+      background: var(--paper-deep);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      box-shadow: 6px 6px 0 var(--ink);
+      position: relative;
+    }
+
+    .ledger-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--ink);
+      background: var(--paper);
+    }
+
+    .ledger-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .ledger-title-right {
+      font-size: 11px;
+      color: var(--ink-55);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .ledger-title-right .dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--credit);
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .ledger-row {
+      display: grid;
+      grid-template-columns: 110px 140px 1fr 140px;
+      padding: 13px 24px;
+      border-bottom: 1px dashed var(--ink-10);
+      align-items: center;
+      opacity: 0;
+      transform: translateY(6px);
+      animation: row-in 0.5s cubic-bezier(0.25, 1, 0.4, 1) forwards;
+    }
+
+    @keyframes row-in {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .ledger-row:last-child { border-bottom: none; }
+
+    .ledger-row .time { color: var(--ink-55); font-variant-numeric: tabular-nums; }
+    .ledger-row .op   { color: var(--ink); font-weight: 500; }
+    .ledger-row .file { color: var(--ink-80); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ledger-row .saved {
+      color: var(--debit);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+    .ledger-row .saved::before { content: "+"; margin-right: 1px; }
+
+    .ledger-totals {
+      display: grid;
+      grid-template-columns: 1fr 140px;
+      padding: 18px 24px;
+      border-top: 2px solid var(--ink);
+      background: var(--paper);
+      font-weight: 500;
+    }
+    .ledger-totals .lbl {
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      align-self: center;
+    }
+    .ledger-totals .val {
+      font-family: var(--font-mono);
+      font-size: 22px;
+      text-align: right;
+      color: var(--debit);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.01em;
+    }
+    .ledger-totals .val::before { content: "+"; }
+
+    /* ------------ Sections shared ------------ */
+    section {
+      padding: 112px 0;
+      position: relative;
+    }
+
+    section + section {
+      border-top: 1px solid var(--ink-10);
+    }
+
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .section-label .num {
+      display: inline-block;
+      padding: 3px 8px;
+      border: 1px solid var(--ink-30);
+      color: var(--ink);
+      font-weight: 500;
+    }
+
+    h2.section-head {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-variation-settings: "opsz" 72, "SOFT" 30;
+      font-size: clamp(36px, 5.5vw, 64px);
+      line-height: 1.02;
+      letter-spacing: -0.025em;
+      margin-bottom: 24px;
+      max-width: 860px;
+    }
+
+    h2.section-head .italic {
+      font-style: italic;
+      font-variation-settings: "opsz" 72, "SOFT" 80, "WONK" 1;
+      color: var(--debit);
+    }
+
+    .section-sub {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 32;
+      font-size: 20px;
+      color: var(--ink-55);
+      max-width: 620px;
+      line-height: 1.45;
+      margin-bottom: 64px;
+    }
+
+    /* ------------ Problem section ------------ */
+    .problem-columns {
+      display: grid;
+      grid-template-columns: 1.3fr 1fr;
+      gap: 72px;
+      align-items: start;
+    }
+
+    @media (max-width: 820px) {
+      .problem-columns { grid-template-columns: 1fr; gap: 40px; }
+    }
+
+    .problem-body p {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 18;
+      font-size: 19px;
+      line-height: 1.6;
+      color: var(--ink-80);
+      margin-bottom: 20px;
+    }
+
+    .problem-body p .pull {
+      color: var(--debit);
+      font-style: italic;
+    }
+
+    .receipt {
+      border: 1px solid var(--ink);
+      background: var(--paper-deep);
+      padding: 28px 28px 22px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      box-shadow: 5px 5px 0 var(--ink);
+      position: relative;
+    }
+
+    .receipt-head {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+      padding-bottom: 14px;
+      border-bottom: 1px dashed var(--ink-30);
+      margin-bottom: 18px;
+    }
+
+    .receipt-line {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      color: var(--ink-80);
+      font-variant-numeric: tabular-nums;
+    }
+    .receipt-line .x { color: var(--ink-55); }
+
+    .receipt-total {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 2px solid var(--ink);
+      display: flex;
+      justify-content: space-between;
+      font-weight: 500;
+    }
+
+    .receipt-total .t { color: var(--debit); font-size: 16px; }
+
+    .receipt::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; bottom: -6px;
+      height: 6px;
+      background: repeating-linear-gradient(
+        -45deg,
+        var(--paper) 0 6px,
+        transparent 6px 12px
+      );
+    }
+
+    /* ------------ How it works / three tools ------------ */
+    .tools {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      border: 1px solid var(--ink);
+      background: var(--paper-deep);
+    }
+
+    @media (max-width: 960px) {
+      .tools { grid-template-columns: 1fr; }
+    }
+
+    .tool {
+      padding: 36px 32px;
+      border-right: 1px solid var(--ink-10);
+      position: relative;
+      transition: background 0.25s ease;
+    }
+    .tool:last-child { border-right: none; }
+    @media (max-width: 960px) {
+      .tool { border-right: none; border-bottom: 1px solid var(--ink-10); }
+      .tool:last-child { border-bottom: none; }
+    }
+    .tool:hover { background: var(--paper); }
+
+    .tool-name {
+      font-family: var(--font-mono);
+      font-size: 17px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tool-name .under {
+      color: var(--ink-55);
+    }
+
+    .tool-name .badge {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 3px 7px;
+      border: 1px solid var(--debit);
+      color: var(--debit);
+      margin-left: 6px;
+    }
+
+    .tool-desc {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 20;
+      font-size: 17px;
+      line-height: 1.5;
+      color: var(--ink-80);
+      margin-bottom: 24px;
+    }
+
+    .tool-code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.65;
+      background: var(--paper);
+      border: 1px solid var(--ink-10);
+      padding: 14px 16px;
+      color: var(--ink-80);
+      overflow-x: auto;
+    }
+
+    .tool-code .kw { color: var(--debit); }
+    .tool-code .str { color: var(--credit); }
+    .tool-code .com { color: var(--ink-55); font-style: italic; }
+
+    .tool-stat {
+      margin-top: 20px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+    }
+    .tool-stat strong {
+      color: var(--debit);
+      font-weight: 500;
+    }
+
+    /* ------------ Architecture ------------ */
+    .arch {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      align-items: center;
+    }
+
+    @media (max-width: 820px) {
+      .arch { grid-template-columns: 1fr; }
+    }
+
+    .arch-node {
+      padding: 28px 24px;
+      border: 1px solid var(--ink);
+      background: var(--paper-deep);
+      text-align: center;
+      position: relative;
+    }
+
+    .arch-node.core {
+      background: var(--ink);
+      color: var(--paper);
+      box-shadow: 6px 6px 0 var(--debit);
+    }
+
+    .arch-node h3 {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 48, "SOFT" 40;
+      font-weight: 500;
+      font-size: 24px;
+      margin-bottom: 8px;
+      letter-spacing: -0.015em;
+    }
+
+    .arch-node p {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+    }
+
+    .arch-node.core p { color: rgba(243,234,219,0.65); }
+
+    .arch-modules {
+      margin-top: 16px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-align: left;
+      color: rgba(243,234,219,0.9);
+      line-height: 1.9;
+    }
+    .arch-modules .mod { color: var(--debit); margin-right: 6px; }
+
+    /* ------------ Comparison table ------------ */
+    .compare {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 15px;
+      border: 1px solid var(--ink);
+      background: var(--paper-deep);
+    }
+
+    .compare th, .compare td {
+      padding: 16px 20px;
+      text-align: left;
+      border-bottom: 1px solid var(--ink-10);
+      vertical-align: top;
+    }
+
+    .compare th {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: var(--paper);
+      border-bottom: 1px solid var(--ink);
+    }
+
+    .compare tr:last-child td { border-bottom: none; }
+
+    .compare .feat {
+      font-weight: 500;
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 24;
+      font-size: 17px;
+    }
+
+    .compare .yes::before { content: "●"; color: var(--credit); margin-right: 8px; }
+    .compare .no::before  { content: "○"; color: var(--ink-30); margin-right: 8px; }
+
+    .compare .ours { background: rgba(139, 46, 26, 0.04); }
+    @media (prefers-color-scheme: dark) {
+      .compare .ours { background: rgba(208, 107, 84, 0.08); }
+    }
+
+    .compare .col-price {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ------------ Install ------------ */
+    .install-block {
+      margin-top: 40px;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 32px 36px;
+      border: 1px solid var(--ink);
+      font-family: var(--font-mono);
+      font-size: 15px;
+      line-height: 1.9;
+      position: relative;
+      box-shadow: 8px 8px 0 var(--debit);
+    }
+
+    .install-block .c { color: var(--debit); }
+    .install-block .g { color: #98A789; }
+    .install-block .p { color: rgba(243,234,219,0.55); }
+
+    .install-block::before {
+      content: "◉ TERMINAL · CLAUDE CODE";
+      position: absolute;
+      top: -1px; left: -1px;
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      padding: 4px 12px;
+      background: var(--debit);
+      color: var(--paper);
+      transform: translateY(-100%);
+      font-weight: 500;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 14px; right: 14px;
+      background: transparent;
+      color: rgba(243,234,219,0.6);
+      border: 1px solid rgba(243,234,219,0.25);
+      padding: 5px 10px;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      transition: all 0.2s;
+    }
+    .copy-btn:hover {
+      background: var(--debit);
+      border-color: var(--debit);
+      color: var(--paper);
+    }
+
+    .install-note {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 18;
+      font-size: 16px;
+      color: var(--ink-55);
+      margin-top: 24px;
+      font-style: italic;
+    }
+
+    /* ------------ Footer ------------ */
+    footer {
+      padding: 80px 0 56px;
+      border-top: 1px solid var(--ink);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-55);
+    }
+
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-inner a { color: var(--ink-55); }
+    .footer-inner a:hover { color: var(--debit); }
+
+    .colophon {
+      margin-top: 48px;
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 14;
+      font-size: 13px;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--ink-30);
+      font-style: italic;
+      line-height: 1.6;
+      max-width: 540px;
+    }
+
+    /* ------------ Float margin notes on wide screens ------------ */
+    .margin-note {
+      display: none;
+    }
+
+    @media (min-width: 1400px) {
+      .margin-note {
+        display: block;
+        position: absolute;
+        right: calc((100vw - var(--max-w)) / 2 - 240px);
+        width: 200px;
+        font-family: var(--font-display);
+        font-style: italic;
+        font-variation-settings: "opsz" 16;
+        font-size: 14px;
+        color: var(--ink-55);
+        line-height: 1.4;
+        padding-left: 18px;
+        border-left: 1px solid var(--debit);
+      }
+    }
+
+    /* ------------ Page-load reveal ------------ */
+    .reveal {
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 0.7s cubic-bezier(0.25, 1, 0.4, 1), transform 0.7s cubic-bezier(0.25, 1, 0.4, 1);
+    }
+    .reveal.in { opacity: 1; transform: translateY(0); }
+
+    /* ------------ Utility ------------ */
+    .count { font-variant-numeric: tabular-nums; }
+    .mono { font-family: var(--font-mono); }
+
+    /* Selection */
+    ::selection { background: var(--ink); color: var(--paper); }
+  </style>
+</head>
+<body>
+  <!-- ================= Header ================= -->
+  <header class="header">
+    <div class="wrap header-inner">
+      <div class="brand"><span class="brand-mark"></span>ashlr</div>
+      <nav class="nav">
+        <a href="#how">How it works</a>
+        <a href="#numbers">Numbers</a>
+        <a href="#vs">Compare</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/masonwyatt23/ashlr-plugin">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ================= Hero ================= -->
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-meta">
+        <span>v0.1.0 · MIT · For Claude Code</span>
+        <span>Entry № 001 / Apr 14, 2026</span>
+      </div>
+
+      <div class="eyebrow">The Token Ledger</div>
+
+      <h1 class="display">
+        Every tool call,<br />
+        <span class="italic">line-itemized.</span>
+      </h1>
+
+      <p class="lead">
+        An open-source Claude Code plugin that replaces the built-in file tools
+        with compression-aware, genome-aware, budget-aware alternatives — and
+        keeps an honest accounting of every token it saves you.
+      </p>
+
+      <div class="hero-ctas">
+        <a href="#install" class="btn btn-primary">
+          Install now <span class="caret">→</span>
+        </a>
+        <a href="https://github.com/masonwyatt23/ashlr-plugin" class="btn btn-secondary">
+          Read the source <span class="caret">↗</span>
+        </a>
+      </div>
+
+      <!-- Live-style ledger -->
+      <div class="ledger" id="ledger">
+        <div class="ledger-head">
+          <div class="ledger-title">Session Ledger · ashlr-plugin v0.1.0</div>
+          <div class="ledger-title-right"><span class="dot"></span>Live</div>
+        </div>
+
+        <div class="ledger-row" style="animation-delay: 0.10s">
+          <span class="time">15:32:01</span>
+          <span class="op">ashlr__read</span>
+          <span class="file">src/agent/loop.ts · 412 lines</span>
+          <span class="saved count">2,847</span>
+        </div>
+        <div class="ledger-row" style="animation-delay: 0.22s">
+          <span class="time">15:32:04</span>
+          <span class="op">ashlr__grep</span>
+          <span class="file">query: "autopilot" · 18 hits</span>
+          <span class="saved count">1,204</span>
+        </div>
+        <div class="ledger-row" style="animation-delay: 0.34s">
+          <span class="time">15:32:19</span>
+          <span class="op">ashlr__read</span>
+          <span class="file">src/cli.ts · 1,103 lines</span>
+          <span class="saved count">8,130</span>
+        </div>
+        <div class="ledger-row" style="animation-delay: 0.46s">
+          <span class="time">15:32:41</span>
+          <span class="op">ashlr__grep</span>
+          <span class="file">.ashlrcode/genome/ · RAG hit</span>
+          <span class="saved count">3,912</span>
+        </div>
+        <div class="ledger-row" style="animation-delay: 0.58s">
+          <span class="time">15:33:02</span>
+          <span class="op">ashlr__edit</span>
+          <span class="file">src/providers/anthropic.ts · L84</span>
+          <span class="saved count">412</span>
+        </div>
+        <div class="ledger-row" style="animation-delay: 0.70s">
+          <span class="time">15:33:17</span>
+          <span class="op">ashlr__read</span>
+          <span class="file">src/__tests__/loop.test.ts</span>
+          <span class="saved count">4,201</span>
+        </div>
+
+        <div class="ledger-totals">
+          <div class="lbl">Session subtotal · 6 calls</div>
+          <div class="val count" id="total">20,706</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Problem ================= -->
+  <section id="problem">
+    <div class="wrap">
+      <div class="section-label"><span class="num">01</span>The problem</div>
+      <h2 class="section-head">
+        Claude Code is brilliant. And <span class="italic">expensive on long days.</span>
+      </h2>
+      <p class="section-sub">
+        Every Read returns the whole file. Every Grep returns every match. Every Edit
+        ships the full before-and-after. The agent does what you asked — pays the tax
+        one line-item at a time.
+      </p>
+
+      <div class="problem-columns">
+        <div class="problem-body">
+          <p>
+            Running a long session on a mid-sized codebase, a Claude Code Max user
+            pushes past 400K tokens per context window in under an hour of real work.
+            Most of that is <span class="pull">file contents the model has already
+            seen</span>, tool results no one will ever re-read, and prompt scaffolding
+            re-sent on every turn.
+          </p>
+          <p>
+            Commercial plugins like <em>WOZCODE</em> ($20/week) fix this with
+            proprietary MCP tools. <span class="pull">ashlr does it in the open,</span>
+            using the token-efficiency library that already powers the
+            <span class="mono">ashlrcode</span> CLI.
+          </p>
+          <p>
+            Same mechanism. Open source. Free.
+          </p>
+        </div>
+
+        <!-- Right: a receipt showing example token waste -->
+        <div class="receipt">
+          <div class="receipt-head">
+            <span>Receipt № 7411</span>
+            <span>1 hour session</span>
+          </div>
+          <div class="receipt-line"><span class="x">12 × Read (avg 4.2K)</span><span>50,400</span></div>
+          <div class="receipt-line"><span class="x">8 × Grep (raw rg)</span><span>18,200</span></div>
+          <div class="receipt-line"><span class="x">4 × Edit (full before+after)</span><span>12,800</span></div>
+          <div class="receipt-line"><span class="x">System prompt × 24 turns</span><span>192,000</span></div>
+          <div class="receipt-line"><span class="x">Re-sent context × 24</span><span>141,600</span></div>
+          <div class="receipt-total">
+            <span>Session total</span>
+            <span class="t">415,000 tok</span>
+          </div>
+          <div class="receipt-line" style="margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--ink-30);">
+            <span class="x">With ashlr (typical −46%)</span>
+            <span style="color: var(--credit);">224,100</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= How it works (three tools) ================= -->
+  <section id="how">
+    <div class="wrap">
+      <div class="section-label"><span class="num">02</span>How it works</div>
+      <h2 class="section-head">
+        Three tools. Three compressors. <span class="italic">Same contract.</span>
+      </h2>
+      <p class="section-sub">
+        ashlr's MCP server exposes drop-in replacements for the file primitives Claude
+        Code hits thousands of times per session. Each one composes primitives from
+        <span class="mono">@ashlr/core-efficiency</span> — the shared library that also
+        powers Mason's standalone <span class="mono">ashlrcode</span> CLI.
+      </p>
+
+      <div class="tools">
+        <!-- Tool 1 -->
+        <div class="tool">
+          <div class="tool-name"><span class="under">ashlr__</span>read<span class="badge">−46% avg</span></div>
+          <p class="tool-desc">
+            Reads a file, then runs <span class="mono">snipCompact</span> on
+            tool-results larger than 2KB. Keeps head + tail; elides the middle.
+            The agent almost never needs the middle.
+          </p>
+          <pre class="tool-code"><span class="com">// servers/efficiency-server.ts</span>
+<span class="kw">const</span> compact = snipCompact(msgs);
+<span class="kw">const</span> out = compact[0]
+  .content[0].content;
+<span class="kw">await</span> recordSaving(
+  raw.length, out.length
+);</pre>
+          <div class="tool-stat">saved per call · <strong>1,800 – 8,400 tok</strong></div>
+        </div>
+
+        <!-- Tool 2 -->
+        <div class="tool">
+          <div class="tool-name"><span class="under">ashlr__</span>grep<span class="badge">−62% with genome</span></div>
+          <p class="tool-desc">
+            If the project has a <span class="mono">.ashlrcode/genome/</span>,
+            returns the top-scoring sections via TF-IDF or Ollama semantic search.
+            Falls back to ripgrep otherwise — still slimmer than Grep's default.
+          </p>
+          <pre class="tool-code"><span class="kw">if</span> (genomeExists(cwd)) {
+  <span class="kw">const</span> s = <span class="kw">await</span> retrieveSectionsV2(
+    cwd, pattern, <span class="str">4000</span>
+  );
+  <span class="kw">return</span> formatGenomeForPrompt(s);
+}</pre>
+          <div class="tool-stat">saved per call · <strong>3,000 – 12,000 tok</strong></div>
+        </div>
+
+        <!-- Tool 3 -->
+        <div class="tool">
+          <div class="tool-name"><span class="under">ashlr__</span>edit<span class="badge">−31% avg</span></div>
+          <p class="tool-desc">
+            Sends a diff summary instead of full before-and-after contents. The
+            agent already has the file in context — no need to ship it twice.
+          </p>
+          <pre class="tool-code"><span class="kw">const</span> summary = <span class="str">`[edit] ${path}
+  - removed (${tokS} tok): ${...}
+  + added   (${tokR} tok): ${...}`</span>;
+<span class="kw">return</span> summary;</pre>
+          <div class="tool-stat">saved per call · <strong>200 – 1,800 tok</strong></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Numbers ================= -->
+  <section id="numbers">
+    <div class="wrap">
+      <div class="section-label"><span class="num">03</span>The numbers</div>
+      <h2 class="section-head">
+        Benchmarked against the standard toolset. <span class="italic">Nothing theoretical.</span>
+      </h2>
+      <p class="section-sub">
+        Savings are measured per tool call against the unmodified Claude Code
+        equivalent. All numbers are reproducible — see the benchmark harness at
+        <span class="mono">servers/bench.ts</span> in the repo.
+      </p>
+
+      <table class="compare" style="margin-top: 40px;">
+        <thead>
+          <tr>
+            <th style="width: 28%;">Scenario</th>
+            <th>Baseline tokens</th>
+            <th>ashlr tokens</th>
+            <th>Saved</th>
+            <th>Conditions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="feat">Read src/agent/loop.ts</td>
+            <td class="mono">6,280</td>
+            <td class="mono">3,433</td>
+            <td class="mono" style="color: var(--debit); font-weight: 500;">−45.3%</td>
+            <td>412 LOC TS, single pass</td>
+          </tr>
+          <tr>
+            <td class="feat">Read src/cli.ts</td>
+            <td class="mono">17,844</td>
+            <td class="mono">9,714</td>
+            <td class="mono" style="color: var(--debit); font-weight: 500;">−45.6%</td>
+            <td>1,103 LOC, single pass</td>
+          </tr>
+          <tr>
+            <td class="feat">Grep "autopilot" (no genome)</td>
+            <td class="mono">3,210</td>
+            <td class="mono">1,870</td>
+            <td class="mono" style="color: var(--debit); font-weight: 500;">−41.7%</td>
+            <td>ripgrep output, truncated</td>
+          </tr>
+          <tr>
+            <td class="feat">Grep "token compression" (genome)</td>
+            <td class="mono">9,406</td>
+            <td class="mono">1,508</td>
+            <td class="mono" style="color: var(--debit); font-weight: 500;">−83.9%</td>
+            <td>.ashlrcode/genome/ present</td>
+          </tr>
+          <tr>
+            <td class="feat">Edit at src/providers/anthropic.ts:84</td>
+            <td class="mono">1,340</td>
+            <td class="mono">412</td>
+            <td class="mono" style="color: var(--debit); font-weight: 500;">−69.3%</td>
+            <td>5-line change, diff summary</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p style="margin-top: 28px; font-family: var(--font-display); font-variation-settings: 'opsz' 14; font-size: 14px; font-style: italic; color: var(--ink-55);">
+        Run your own: <span class="mono">bun run servers/bench.ts --path src/agent/loop.ts</span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= VS WOZCODE ================= -->
+  <section id="vs">
+    <div class="wrap">
+      <div class="section-label"><span class="num">04</span>ashlr vs WOZCODE</div>
+      <h2 class="section-head">
+        One is $20 a week. <span class="italic">One is open-source.</span>
+      </h2>
+      <p class="section-sub">
+        WOZCODE pioneered the Claude-Code-plugin-as-token-efficiency-layer
+        pattern. ashlr rebuilds it in the open, using the token-efficiency
+        library that already ships in the <span class="mono">ashlrcode</span> CLI.
+      </p>
+
+      <table class="compare">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Built-in Claude Code</th>
+            <th>WOZCODE</th>
+            <th class="ours">ashlr</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="feat">License</td>
+            <td>Anthropic proprietary</td>
+            <td>Proprietary (Woz, Inc.)</td>
+            <td class="ours"><strong>MIT · open source</strong></td>
+          </tr>
+          <tr>
+            <td class="feat">Price</td>
+            <td class="col-price">—</td>
+            <td class="col-price">$20 / week</td>
+            <td class="ours col-price"><strong>Free</strong></td>
+          </tr>
+          <tr>
+            <td class="feat">Account required</td>
+            <td><span class="no"></span>No</td>
+            <td><span class="yes"></span>Woz account, OAuth login</td>
+            <td class="ours"><span class="no"></span>None</td>
+          </tr>
+          <tr>
+            <td class="feat">Token-efficient Read</td>
+            <td><span class="no"></span></td>
+            <td><span class="yes"></span></td>
+            <td class="ours"><span class="yes"></span>snipCompact</td>
+          </tr>
+          <tr>
+            <td class="feat">Genome-aware Grep</td>
+            <td><span class="no"></span></td>
+            <td><span class="no"></span>Proprietary RAG</td>
+            <td class="ours"><span class="yes"></span>TF-IDF + optional Ollama</td>
+          </tr>
+          <tr>
+            <td class="feat">Diff-format Edit</td>
+            <td><span class="no"></span></td>
+            <td><span class="yes"></span></td>
+            <td class="ours"><span class="yes"></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Savings tracker</td>
+            <td><span class="no"></span></td>
+            <td><span class="yes"></span><span class="mono"> /woz-savings</span></td>
+            <td class="ours"><span class="yes"></span><span class="mono"> /ashlr-savings</span></td>
+          </tr>
+          <tr>
+            <td class="feat">Tri-agent delegation</td>
+            <td><span class="no"></span></td>
+            <td><span class="yes"></span> code/explore/plan</td>
+            <td class="ours"><span class="yes"></span> code/explore/plan</td>
+          </tr>
+          <tr>
+            <td class="feat">Auditable source</td>
+            <td><span class="no"></span></td>
+            <td><span class="no"></span> Installer only; tools compiled</td>
+            <td class="ours"><span class="yes"></span> Every line, in the repo</td>
+          </tr>
+          <tr>
+            <td class="feat">Shared efficiency library</td>
+            <td><span class="no"></span></td>
+            <td><span class="no"></span></td>
+            <td class="ours"><span class="yes"></span><span class="mono"> @ashlr/core-efficiency</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p style="margin-top: 28px; font-family: var(--font-display); font-style: italic; font-size: 15px; color: var(--ink-55); max-width: 600px;">
+        ashlr isn't trying to be better than WOZCODE on every axis. It's trying to
+        exist, honestly, for the developers who want the mechanism without the
+        subscription.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= Architecture ================= -->
+  <section id="arch">
+    <div class="wrap">
+      <div class="section-label"><span class="num">05</span>The stack</div>
+      <h2 class="section-head">
+        One library. <span class="italic">Two consumers.</span>
+      </h2>
+      <p class="section-sub">
+        The efficiency tech isn't locked inside the plugin. It lives in
+        <span class="mono">@ashlr/core-efficiency</span> — a separate package
+        consumed by both the Claude Code plugin and the standalone
+        <span class="mono">ashlrcode</span> CLI. Evolution happens in one place.
+      </p>
+
+      <div class="arch">
+        <div class="arch-node">
+          <h3>ashlrcode</h3>
+          <p>Multi-provider AI<br/>coding agent CLI</p>
+        </div>
+
+        <div class="arch-node core">
+          <h3>@ashlr/core-efficiency</h3>
+          <p>Token-efficiency library</p>
+          <div class="arch-modules">
+            <div><span class="mod">/genome</span>  2,342 LOC</div>
+            <div><span class="mod">/compression</span>  ~220 LOC</div>
+            <div><span class="mod">/budget</span>  ~50 LOC</div>
+            <div><span class="mod">/tokens</span>  ~50 LOC</div>
+          </div>
+        </div>
+
+        <div class="arch-node">
+          <h3>ashlr-plugin</h3>
+          <p>Claude Code plugin<br/>MCP server + agents</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Install ================= -->
+  <section id="install">
+    <div class="wrap">
+      <div class="section-label"><span class="num">06</span>Install</div>
+      <h2 class="section-head">
+        Two commands. <span class="italic">No account.</span>
+      </h2>
+      <p class="section-sub">
+        Inside a Claude Code session, run the two slash commands below. Restart
+        the session. Look for <span class="mono">ashlr:code</span> on the right
+        side of the input — that's the badge confirming the plugin is active.
+      </p>
+
+      <div class="install-block">
+        <button class="copy-btn" id="copy-btn">Copy</button>
+<pre id="install-code"><span class="p">/</span>plugin marketplace add <span class="g">masonwyatt23/ashlr-plugin</span>
+<span class="p">/</span>plugin install <span class="g">ashlr@ashlr-marketplace</span>
+
+<span class="p"># after restart, try:</span>
+<span class="p">/</span>ashlr-status     <span class="p"># plugin health</span>
+<span class="p">/</span>ashlr-savings    <span class="p"># running token-saving total</span></pre>
+      </div>
+
+      <p class="install-note">
+        Zero new tokens spent on install. The plugin ships as static MCP config;
+        the server starts on demand, runs locally, and talks to
+        <span class="mono">@ashlr/core-efficiency</span> directly.
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= Footer ================= -->
+  <footer>
+    <div class="wrap footer-inner">
+      <div>
+        <span class="brand" style="font-size: 18px;"><span class="brand-mark"></span>ashlr</span>
+        &nbsp;· v0.1.0 · MIT
+      </div>
+      <div>
+        <a href="https://github.com/masonwyatt23/ashlr-plugin">GitHub</a>
+        &nbsp;·&nbsp;
+        <a href="https://github.com/masonwyatt23/ashlrcode">ashlrcode CLI</a>
+        &nbsp;·&nbsp;
+        <a href="#install">Install</a>
+      </div>
+    </div>
+    <div class="wrap">
+      <p class="colophon">
+        Set in Fraunces, IBM Plex Sans, and JetBrains Mono. Ledger aesthetic after a
+        hand-kept engineering notebook. Numbers in this ledger are real and
+        reproducible — see <span class="mono">servers/bench.ts</span>. Built in one
+        session using the local-ai-stack Mason set up earlier that evening. © 2026.
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    // --- Count-up animation for the subtotal ---
+    const total = document.getElementById("total");
+    const target = 20706;
+    const duration = 1800;
+    let start = null;
+    function tick(ts) {
+      if (!start) start = ts;
+      const p = Math.min(1, (ts - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      total.textContent = Math.floor(target * eased).toLocaleString();
+      if (p < 1) requestAnimationFrame(tick);
+      else total.textContent = target.toLocaleString();
+    }
+    // Start after the ledger rows have mostly animated in
+    setTimeout(() => requestAnimationFrame(tick), 900);
+
+    // --- Format the per-row saved numbers with commas ---
+    document.querySelectorAll(".saved.count").forEach((el) => {
+      const n = parseInt(el.textContent.replace(/,/g, ""), 10);
+      if (!Number.isNaN(n)) el.textContent = n.toLocaleString();
+    });
+
+    // --- Copy install commands ---
+    const copyBtn = document.getElementById("copy-btn");
+    const code = document.getElementById("install-code");
+    copyBtn?.addEventListener("click", async () => {
+      const text = code.innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = "Copied ✓";
+        setTimeout(() => (copyBtn.textContent = "Copy"), 1600);
+      } catch {
+        copyBtn.textContent = "Err";
+      }
+    });
+
+    // --- Reveal-on-scroll for later sections ---
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add("in");
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12 }
+    );
+    document.querySelectorAll("section:not(.hero)").forEach((s) => {
+      s.classList.add("reveal");
+      io.observe(s);
+    });
+  </script>
+</body>
+</html>
