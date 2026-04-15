@@ -1,6 +1,10 @@
 # ashlr-plugin
 
-Open-source Claude Code plugin that **cuts token usage** via genome-aware file retrieval, 3-tier context compression, and provider-aware prompt budgeting. Alternative to [WOZCODE](https://wozcode.com), powered by [`@ashlr/core-efficiency`](../ashlr-core-efficiency).
+[![landing page](./docs/assets/og.png)](https://plugin.ashlr.ai/)
+
+**Landing page:** [plugin.ashlr.ai](https://plugin.ashlr.ai/) · **Core library:** [`@ashlr/core-efficiency`](https://github.com/masonwyatt23/ashlr-core-efficiency) · **License:** MIT
+
+Open-source Claude Code plugin that **cuts token usage** via genome-aware file retrieval, 3-tier context compression, and provider-aware prompt budgeting. Alternative to [WOZCODE](https://wozcode.com). Mean **−79.5%** savings on files ≥ 2 KB ([benchmarks](./docs/benchmarks.json)).
 
 ## What it does
 
