@@ -40,7 +40,7 @@ fi
 #    guard + skip current dir. Non-version dirs (latest, dev-branch) survive.
 CURRENT_VERSION="$(basename "$PLUGIN_ROOT")"
 PARENT="$(dirname "$PLUGIN_ROOT")"
-if [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$PARENT" ]; then
+if [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$PARENT" ] && [[ "$PARENT" == */plugins/cache/* ]]; then
   for sib in "$PARENT"/*/; do
     sib="${sib%/}"
     name="$(basename "$sib")"

@@ -422,6 +422,16 @@ const PR_JSON_FIELDS =
 const ISSUE_JSON_FIELDS =
   "number,title,state,author,createdAt,updatedAt,body,labels,comments";
 
+// Guard against argv-injection: `gh` accepts many flag-like positionals
+// (e.g. `--config path`), so we require the strict owner/name shape.
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+function validateRepo(repo: string, tool: string): string {
+  if (!REPO_RE.test(repo)) {
+    throw new Error(`${tool}: repo must match 'owner/name' (got '${repo}')`);
+  }
+  return repo;
+}
+
 async function ashlrPr(input: { number: number; repo?: string; mode?: string }): Promise<string> {
   const n = Number(input.number);
   if (!Number.isFinite(n) || n <= 0) throw new Error("ashlr__pr: `number` must be a positive integer");
@@ -429,7 +439,7 @@ async function ashlrPr(input: { number: number; repo?: string; mode?: string }):
   if (!["summary", "full", "thread"].includes(mode)) {
     throw new Error(`ashlr__pr: invalid mode '${mode}' (expected summary|full|thread)`);
   }
-  const repo = input.repo ?? detectRepo();
+  const repo = validateRepo(input.repo ?? detectRepo(), "ashlr__pr");
 
   const args = ["pr", "view", String(n), "--repo", repo, "--json", PR_JSON_FIELDS];
   const rawJson = runGh(args);
@@ -454,7 +464,7 @@ async function ashlrIssue(input: { number: number; repo?: string; mode?: string 
   if (!["summary", "thread"].includes(mode)) {
     throw new Error(`ashlr__issue: invalid mode '${mode}' (expected summary|thread)`);
   }
-  const repo = input.repo ?? detectRepo();
+  const repo = validateRepo(input.repo ?? detectRepo(), "ashlr__issue");
   const args = ["issue", "view", String(n), "--repo", repo, "--json", ISSUE_JSON_FIELDS];
   const rawJson = runGh(args);
   const iss = JSON.parse(rawJson) as IssueData;

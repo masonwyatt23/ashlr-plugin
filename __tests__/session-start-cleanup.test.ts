@@ -90,6 +90,26 @@ describe("cleanupStalePluginVersions", () => {
     expect(existsSync(v060)).toBe(true);
   });
 
+  test("parent outside plugins/cache tree → refuse to sweep (safety)", async () => {
+    const outsideRoot = await mkdtemp(join(tmpdir(), "ashlr-outside-"));
+    try {
+      const outsideParent = join(outsideRoot, "versions", "node");
+      mkdirSync(outsideParent, { recursive: true });
+      const current = join(outsideParent, "1.0.0");
+      mkdirSync(current);
+      const sibling = join(outsideParent, "2.0.0");
+      mkdirSync(sibling);
+      writeFileSync(join(sibling, "sentinel.txt"), "x");
+
+      const res = cleanupStalePluginVersions(current, { logger: () => {} });
+      expect(res.removed).toEqual([]);
+      expect(res.reason).toBe("parent-not-in-plugin-cache");
+      expect(existsSync(sibling)).toBe(true);
+    } finally {
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   test("no siblings to clean → empty removed list, no log", () => {
     const v060 = seed("0.6.0");
     const logs: string[] = [];

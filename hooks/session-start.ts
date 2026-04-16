@@ -72,6 +72,12 @@ export function cleanupStalePluginVersions(
     }
     const parent = dirname(pluginRoot.replace(/\/+$/, ""));
     if (!existsSync(parent)) return { removed: [], reason: "no-parent" };
+    // Only sweep inside Claude Code's plugin cache tree. Guards against a
+    // stray CLAUDE_PLUGIN_ROOT pointing at e.g. ~/.nvm/versions/node/1.0.0
+    // which would otherwise make us rm semver-shaped siblings.
+    if (!parent.includes("/plugins/cache/")) {
+      return { removed: [], reason: "parent-not-in-plugin-cache" };
+    }
 
     const entries = readdirSync(parent, { withFileTypes: true });
     const removed: string[] = [];
