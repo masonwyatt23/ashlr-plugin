@@ -13,6 +13,7 @@ bun run ${CLAUDE_PLUGIN_ROOT}/scripts/genome-init.ts --dir "$(pwd)"
 
 Pass `--force` only if the user explicitly asks to overwrite an existing genome.
 Pass `--minimal` only if the user asks to skip the auto-populated architecture/conventions sections.
+Pass `--summarize` if the user wants to use a local Ollama model to generate concise CLAUDE.md summaries instead of truncating. Requires Ollama running locally — falls back gracefully to truncation if unavailable.
 
 After the command runs:
 
