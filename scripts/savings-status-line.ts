@@ -23,7 +23,7 @@
  *     overflow rather than scrolling, so we self-trim).
  */
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { c } from "./ui.ts";
@@ -122,6 +122,53 @@ function readJson<T>(path: string): T | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 2-second read cache (mtime-aware)
+// ---------------------------------------------------------------------------
+// Claude Code invokes the status line frequently (on every prompt tick).
+// Re-reading + re-parsing stats.json on every call is wasteful — the status
+// bar does not need sub-second freshness. We cache JSON reads for 2s keyed by
+// absolute path, but a cache entry is invalidated whenever the file's mtime
+// changes (or its existence flips). That keeps the cache effective under
+// steady load while staying correct across tests and mid-session writes.
+//
+// Cache is process-local — each fresh invocation of this script as a Claude
+// Code subprocess starts empty; the cache only helps long-running hosts and
+// within-test batch calls.
+const READ_CACHE_TTL_MS = 2000;
+interface CacheEntry {
+  at: number;
+  mtimeMs: number;
+  value: unknown;
+}
+const _readCache = new Map<string, CacheEntry>();
+
+function fileMtime(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    // Missing → sentinel -1 so "absent → present" also invalidates.
+    return -1;
+  }
+}
+
+function readJsonCached<T>(path: string): T | null {
+  const now = Date.now();
+  const mtime = fileMtime(path);
+  const hit = _readCache.get(path);
+  if (hit && now - hit.at < READ_CACHE_TTL_MS && hit.mtimeMs === mtime) {
+    return hit.value as T | null;
+  }
+  const fresh = readJson<T>(path);
+  _readCache.set(path, { at: now, mtimeMs: mtime, value: fresh });
+  return fresh;
+}
+
+/** Test hook — flush the 2s read cache. */
+export function _resetReadCache(): void {
+  _readCache.clear();
+}
+
 function pickTip(tips: readonly string[], seed?: number): string {
   if (tips.length === 0) return "";
   const idx = (seed ?? Math.floor(Date.now() / 86_400_000)) % tips.length;
@@ -142,7 +189,7 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
   try {
     const home = opts.home ?? homedir();
     const budget = opts.budget ?? resolveBudget(opts.env);
-    const settings = readJson<{ ashlr?: AshlrSettings }>(
+    const settings = readJsonCached<{ ashlr?: AshlrSettings }>(
       join(home, ".claude", "settings.json"),
     );
     const cfg: AshlrSettings = settings?.ashlr ?? {};
@@ -156,7 +203,7 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
     const showTips = cfg.statusLineTips ?? true;
     const showSpark = cfg.statusLineSparkline ?? true;
 
-    const stats = readJson<Stats>(join(home, ".ashlr", "stats.json"));
+    const stats = readJsonCached<Stats>(join(home, ".ashlr", "stats.json"));
     const session = stats?.session?.tokensSaved ?? 0;
     const lifetime = stats?.lifetime?.tokensSaved ?? 0;
 

@@ -10,6 +10,10 @@
   "repository": "https://github.com/ashlrai/ashlr-plugin",
   "license": "MIT",
   "keywords": ["claude-code", "plugin", "token-efficiency", "mcp", "ashlrcode", "wozcode-alternative"],
+  "statusLine": {
+    "type": "command",
+    "command": "bun run ${CLAUDE_PLUGIN_ROOT}/scripts/savings-status-line.ts"
+  },
   "mcpServers": {
     "ashlr-efficiency": { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/efficiency-server.ts"] },
     "ashlr-sql":        { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/sql-server.ts"] },
