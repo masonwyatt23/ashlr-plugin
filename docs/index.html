@@ -1247,6 +1247,92 @@
       .vd-col { padding: 14px 16px 56px; font-size: 11.5px; }
       .vd-delta-num { font-size: 40px; }
     }
+
+    /* ------------ Mobile overflow fixes ------------ */
+    /* Guarantee block-level images/media never push past viewport */
+    img, svg, iframe, video { max-width: 100%; height: auto; }
+
+    /* Preformatted content must contain its own overflow, not the page */
+    pre {
+      max-width: 100%;
+      overflow-x: auto;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+    /* Keep the code-demo preformatted blocks monospace-tight but inside their container */
+    .tool-code, .hero-install-pre, .install-block pre {
+      white-space: pre;
+      overflow-x: auto;
+      word-break: normal;
+      overflow-wrap: normal;
+      max-width: 100%;
+    }
+
+    /* Grid children need min-width:0 so long content (pre, long text) can shrink */
+    .tools > *, .arch > *, .problem-columns > * { min-width: 0; }
+
+    /* Tables that list feature comparisons should scroll horizontally on narrow screens
+       rather than stretch the page. Wrap with a scroll container via overflow on parent. */
+    .compare { display: block; max-width: 100%; overflow-x: auto; }
+    .compare thead, .compare tbody { display: table; width: 100%; table-layout: auto; }
+
+    @media (max-width: 720px) {
+      :root { --gutter: 20px; }
+
+      /* Nav: smaller gap, allow wrap so it doesn't blow out horizontally */
+      .header-inner { flex-wrap: wrap; gap: 12px; }
+      .nav { gap: 18px; flex-wrap: wrap; font-size: 12px; }
+
+      /* Hero meta can stack instead of side-by-side */
+      .hero-meta { flex-wrap: wrap; gap: 8px; }
+
+      /* Terminal demo: let long scripted lines wrap instead of forcing horizontal scroll */
+      .demo-wrap { font-size: 12px; }
+      .demo-body { padding: 18px 16px 24px; }
+      .demo-line { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+      .demo-total { flex-wrap: wrap; gap: 6px; }
+
+      /* Hero install block: labels, pres, copy buttons must stay inside 100% */
+      .hero-install { padding: 18px 14px 14px; }
+      .hero-install-pre { font-size: 12.5px; padding: 22px 12px 12px; }
+
+      /* Install block: prevent box-shadow from expanding layout past viewport */
+      .install-block { padding: 22px 20px; font-size: 13px; box-shadow: 4px 4px 0 var(--debit); max-width: 100%; }
+      .install-block pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+
+      /* Receipt: tighten so box-shadow + padding fit */
+      .receipt { padding: 20px 18px 16px; box-shadow: 4px 4px 0 var(--ink); }
+
+      /* Tools, ledger, value-demo — softer shadows so they don't extend layout */
+      .ledger { box-shadow: 4px 4px 0 var(--ink); font-size: 12px; }
+      .ledger-row { grid-template-columns: 72px 1fr 90px; padding: 10px 16px; column-gap: 10px; }
+      .ledger-row .op { display: none; } /* hide op column to make room on narrow screens */
+      .ledger-head, .ledger-totals { padding: 14px 16px; }
+      .ledger-totals { grid-template-columns: 1fr 100px; }
+
+      .demo-wrap, .vd { box-shadow: 4px 4px 0 var(--debit); }
+
+      /* Section spacing */
+      section { padding: 72px 0; }
+      .hero { padding: 48px 0 64px; }
+      .section-sub { margin-bottom: 40px; }
+
+      /* Hero CTA buttons: full-width feels better on phones */
+      .hero-ctas { gap: 12px; }
+      .btn { padding: 12px 18px; font-size: 12px; }
+    }
+
+    @media (max-width: 480px) {
+      .nav { gap: 14px; font-size: 11px; }
+      .install-block { padding: 20px 16px; font-size: 12.5px; }
+      .install-block pre { font-size: 12.5px; }
+      .hero-install-label { font-size: 8px; letter-spacing: 0.16em; }
+      /* Tighten split-screen value demo headers */
+      .vd-head { padding: 12px 14px; font-size: 10px; letter-spacing: 0.14em; gap: 8px; }
+      .vd-foot { padding: 14px 14px; flex-wrap: wrap; gap: 10px; }
+      .vd-delta-num { font-size: 36px; }
+    }
   </style>
 </head>
 <body>
