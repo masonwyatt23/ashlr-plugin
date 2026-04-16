@@ -43,6 +43,15 @@
             "command": "bun run ${CLAUDE_PLUGIN_ROOT}/hooks/genome-scribe-hook.ts"
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Edit|Write|MultiEdit|mcp__ashlr-efficiency__ashlr__read|mcp__ashlr-efficiency__ashlr__grep|mcp__ashlr-efficiency__ashlr__edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run ${CLAUDE_PLUGIN_ROOT}/hooks/orient-nudge-hook.ts"
+          }
+        ]
       }
     ]
   }

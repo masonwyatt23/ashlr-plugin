@@ -1,7 +1,7 @@
 {
   "name": "ashlr",
-  "version": "0.6.2",
-  "description": "Open-source Claude Code plugin — token-efficient Read/Grep/Edit/SQL/Bash/Tree/HTTP/Diff/Logs + hooks + status line + tri-agent delegation + active genome scribe loop. MIT, zero telemetry.",
+  "version": "0.7.0",
+  "description": "Open-source Claude Code plugin — 11 MCP tools (Read/Grep/Edit/SQL/Bash/Tree/HTTP/Diff/Logs/Orient/PR+Issue), self-healing entrypoint, LLM summarization, genome scribe loop. MIT, zero telemetry.",
   "author": {
     "name": "Mason Wyatt",
     "url": "https://github.com/ashlrai"
@@ -18,6 +18,8 @@
     "ashlr-http":       { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/http-server.ts"] },
     "ashlr-diff":       { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/diff-server.ts"] },
     "ashlr-logs":       { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/logs-server.ts"] },
-    "ashlr-genome":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/genome-server.ts"] }
+    "ashlr-genome":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/genome-server.ts"] },
+    "ashlr-orient":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/orient-server.ts"] },
+    "ashlr-github":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/github-server.ts"] }
   }
 }
