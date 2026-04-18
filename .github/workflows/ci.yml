@@ -4,92 +4,59 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out ashlr-plugin (into subdir so sibling can live next to it)
-        uses: actions/checkout@v4
-        with:
-          path: ashlr-plugin
-
-      - name: Check out @ashlr/core-efficiency sibling
-        uses: actions/checkout@v4
-        with:
-          repository: ashlrai/ashlr-core-efficiency
-          path: ashlr-core-efficiency
-
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
         with:
           bun-version: latest
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - run: bun install
+      - run: bun run typecheck
 
-      - name: Install core-efficiency deps
-        working-directory: ashlr-core-efficiency
-        run: bun install
-
-      - name: Install plugin deps
-        working-directory: ashlr-plugin
-        run: bun install
-
-      - name: Typecheck plugin
-        working-directory: ashlr-plugin
-        run: bunx tsc --noEmit
-
-      - name: Typecheck core-efficiency
-        working-directory: ashlr-core-efficiency
-        run: bunx tsc --noEmit
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ASHLR_STATS_SYNC: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+      - run: bun install
+      - run: bun run test
 
   smoke:
     runs-on: ubuntu-latest
-    needs: typecheck
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
         with:
-          path: ashlr-plugin
-      - uses: actions/checkout@v4
+          bun-version: latest
+      - name: Cache node_modules
+        uses: actions/cache@v4
         with:
-          repository: ashlrai/ashlr-core-efficiency
-          path: ashlr-core-efficiency
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install
-        working-directory: ashlr-plugin
-        run: bun install
-
-      - name: MCP server responds to initialize + tools/list
-        working-directory: ashlr-plugin
-        run: |
-          printf '%s\n%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-            | bun run servers/efficiency-server.ts > /tmp/mcp.out
-          grep -q '"name":"ashlr__read"' /tmp/mcp.out
-          grep -q '"name":"ashlr__grep"' /tmp/mcp.out
-          grep -q '"name":"ashlr__edit"' /tmp/mcp.out
-          grep -q '"name":"ashlr__savings"' /tmp/mcp.out
-          echo "✓ all 4 MCP tools registered"
-
-      - name: Bench smoke (non-fatal — reports savings)
-        working-directory: ashlr-plugin
-        run: bun run servers/bench.ts --dir ../ashlr-core-efficiency/src/genome || true
-
-  pages:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    permissions:
-      pages: write
-      id-token: write
-      contents: read
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - run: bun install
+      - name: Run real-time counters smoke test
+        run: bun run scripts/smoke-realtime.ts
+        timeout-minutes: 2

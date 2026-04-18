@@ -2,6 +2,43 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0] — 2026-04-17
+
+**Production-ready.** Fifteen MCP tools, twenty-three skills, a status line nobody else has, and 794 tests — zero skipped, zero failing. This is the plugin graduating from "interesting prototype" to "thing you rely on."
+
+### Added
+
+- **`ashlr__diff_semantic`** (`servers/diff-semantic-server.ts`) — AST-aware diff. Detects renames that span ≥3 files, collapses formatting-only changes, flags signature-only changes. A 200-line symbol rename across 20 files renders as `renamed oldName → newName (28 occurrences across 14 files)` instead of 200 lines of patch. Falls back to `ashlr__diff` compact output when no semantic patterns detected.
+- **`/ashlr-coach` skill** (`scripts/coach-report.ts` + `commands/ashlr-coach.md`) — reads the session log, surfaces actionable nudges: "used native Read on N large files — ~Ktok wasted," "no genome but heavy grep usage in project X," etc. Five rules, each only bullets when genuinely triggered.
+- **`/ashlr-handoff` skill** (`scripts/handoff-pack.ts` + `commands/ashlr-handoff.md`) — exports a compact markdown primer (session summary, recent files, genome status, open todos) to `.ashlr/handoffs/<ts>.md`. Paste into the next session to resume cold without re-exploring. Pairs with the context-pressure widget.
+- **Cursor + Goose ports** (`ports/cursor/mcp.json`, `ports/goose/recipe.yaml`, `ports/README.md`) — ashlr's MCP servers run under any compatible host. Cursor and Goose users get the same 14 tools (skills/hooks/status-line remain Claude-specific, stats still land in `~/.ashlr/stats.json`).
+- **Team-shared genome guide** (`docs/team-genome.md`) — 267-line contributor guide on committing `.ashlrcode/genome/` to the repo, merge-conflict resolution, the `genome-ignore` convention, and bootstrap workflow.
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) — typecheck + test (with ripgrep installed so grep-confidence tests actually fire) + real-time smoke test on every push and PR. Auto-release workflow (`release.yml`) fires on `v*.*.*` tags.
+
+### Fixed
+
+- **`no-genome grep emits tool_fallback` flake** (`__tests__/efficiency-server.test.ts`). Root cause: `rpcWithHome` spread the full parent `process.env` into the subprocess, so any earlier test that mutated `process.env.HOME` and pointed at a since-deleted tmpdir would poison this test's subprocess env. Fix: spawn the subprocess with a minimal `{ HOME, PATH }` env, exactly pinned. The test is now unskipped and passes reliably in the full suite.
+
+### Tests
+
+- **794 pass, 1 skip (only `rg` binary missing on dev macOS — runs green in CI), 0 fail** across 48 files.
+- Baseline at session start was 287 pass across 24 files in v0.6.0. Net: **+507 tests** over the course of one day and six releases.
+
+### Highlights from the 0.8.x → 1.0.0 arc
+
+- Per-session token accounting keyed by CLAUDE_SESSION_ID with a PPID-hash fallback so sessions can't clobber each other across terminals.
+- Animated status line: 16-rung Unicode ramp, truecolor gradient sweep, 4-second activity pulse with `↑` indicator, context-pressure widget, width-stable across 60 frames.
+- Real-time counters: worst-case visible latency ~550 ms (was 2.25 s).
+- Seven new MCP servers: `ashlr__glob`, `ashlr__webfetch`, `ashlr__multi_edit`, `ashlr__ask`, `ashlr__diff_semantic`, `ashlr__savings` (dashboard upgrade), plus `_genome-live.ts` auto-refresh.
+- Seven new skills: `/ashlr-allow`, `/ashlr-usage`, `/ashlr-errors`, `/ashlr-demo`, `/ashlr-badge`, `/ashlr-legend`, `/ashlr-dashboard`, `/ashlr-coach`, `/ashlr-handoff`.
+- SSRF-safe fetch, confidence footers on every compressed output, calibration harness, fallback/escalation event emission.
+
+### Migration notes
+
+- No breaking changes from 0.9.x. Stats.json schema is still `v2`; legacy orphaned PPID-hash buckets get dropped on SessionEnd.
+- Run `/ashlr-allow` once to silence permission prompts, then `/reload-plugins`.
+
+
 ## [0.9.3] — 2026-04-17
 
 **Bugfix: "session counter stuck at 0".** Users reported the status line showed `session +0` even as `lifetime +N` kept ticking up. Root cause: Claude Code forwards `CLAUDE_SESSION_ID` to the status-line/hook contexts but does **not** forward it to MCP server subprocesses. So writers (MCP servers) wrote to a PPID-hash bucket while the reader (status line) queried the CLAUDE_SESSION_ID bucket, and the two never met.

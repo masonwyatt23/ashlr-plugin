@@ -614,33 +614,17 @@ describe("MCP server · error handling", () => {
 
 describe("MCP server · fallback event emission", () => {
   let home: string;
-  let originalHome: string | undefined;
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "ashlr-fallback-test-"));
     await mkdir(join(home, ".ashlr"), { recursive: true });
-    // Some prior test in the combined suite may have left process.env.HOME
-    // pointing at a deleted tmpdir. Pin it to a known good value so the
-    // subprocess inherits something sane even if the test's own env override
-    // races with module-cached resolution.
-    originalHome = process.env.HOME;
-    process.env.HOME = home;
   });
 
   afterEach(async () => {
-    if (originalHome !== undefined) process.env.HOME = originalHome;
-    else delete process.env.HOME;
     await rm(home, { recursive: true, force: true });
   });
 
-  // Skipped in the combined suite pending a bun test isolation fix — passes
-  // reliably when this file runs alone via `bun test __tests__/efficiency-server.test.ts`.
-  // Likely flake path: a sibling test file leaves process.env.HOME or a
-  // module-cached resolution inconsistent, so the MCP subprocess writes the
-  // tool_fallback record to a log path the assertion code doesn't check.
-  // The feature itself ships fine — verified by isolated runs and by
-  // `/ashlr-usage` picking up fallback events in real sessions.
-  test.skip("no-genome grep emits tool_fallback with reason=no-genome into session log", async () => {
+  test("no-genome grep emits tool_fallback with reason=no-genome into session log", async () => {
     // Create a minimal project dir without a genome so the no-genome path fires.
     const projDir = join(home, "proj");
     await mkdir(projDir, { recursive: true });
@@ -648,18 +632,29 @@ describe("MCP server · fallback event emission", () => {
 
     const logPath = join(home, ".ashlr", "session-log.jsonl");
 
-    await rpcWithHome(
-      [
-        INIT,
-        {
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/call",
-          params: { name: "ashlr__grep", arguments: { pattern: "hello", cwd: projDir } },
-        },
-      ],
-      home,
-    );
+    // Use a clean env (HOME + PATH only) so the subprocess writes to the exact
+    // tmpdir we control — not to whatever HOME a prior test may have left in
+    // process.env or module-cached state.
+    const proc = spawn({
+      cmd: ["bun", "run", "servers/efficiency-server.ts"],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    });
+    const input =
+      JSON.stringify(INIT) +
+      "\n" +
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "ashlr__grep", arguments: { pattern: "hello", cwd: projDir } },
+      }) +
+      "\n";
+    proc.stdin.write(input);
+    await proc.stdin.end();
+    await proc.exited;
 
     // Poll the log file with a bounded wait so the test isn't flaky under
     // a loaded machine where fs.appendFile takes > 100ms to flush.
