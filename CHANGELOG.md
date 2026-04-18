@@ -2,6 +2,27 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] — 2026-04-17
+
+**Zombie-process resilience.** Session counter showed `+0` on machines with pre-v0.8.0 MCP server processes still running (from terminals opened before the day's upgrade) because those old processes overwrite the v2 `stats.json` with v1 shape every 250 ms, wiping the `sessions` map.
+
+### Fixed
+
+- **Status-line `pickSession` fallback** (`scripts/savings-status-line.ts`). When the v2 `sessions` map is empty but `stats.session` (v1 singular) has a `tokensSaved`, surface that number rather than 0. The v1 counter technically lies across concurrent terminals but "slightly wrong" beats "stuck at 0." Full correctness returns once all stale MCP processes die (achieved by fully restarting Claude Code, not just `/reload-plugins`).
+
+### Root cause (for the record)
+
+`/reload-plugins` re-reads plugin manifests but does NOT kill MCP server subprocesses spawned by earlier reloads. If a terminal was opened before v0.8.0 shipped and is still running, its pre-v0.8.0 `ashlr-efficiency` / `ashlr-bash` / etc. processes keep writing v1-shape stats.json alongside the new v2 writers. Atomic rename + file lock in `_stats.ts` don't help because both writers think they're authoritative.
+
+### Recommendation
+
+If you see `session +0`, fully quit Claude Code (all terminals) and reopen. That kills every zombie MCP process. Next session will be clean v2.
+
+### Tests
+
+- **794 pass, 1 skip, 0 fail**. New test case in `__tests__/savings-status-line.test.ts` exercises the v1-fallback path.
+
+
 ## [1.0.0] — 2026-04-17
 
 **Production-ready.** Fifteen MCP tools, twenty-three skills, a status line nobody else has, and 794 tests — zero skipped, zero failing. This is the plugin graduating from "interesting prototype" to "thing you rely on."

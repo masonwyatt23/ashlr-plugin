@@ -100,22 +100,36 @@ function currentSessionId(env: NodeJS.ProcessEnv = process.env): string {
  * vice versa).
  */
 function pickSession(stats: Stats | null, ids: string[]): SessionBucket | null {
-  if (!stats || !stats.sessions) return null;
-  let calls = 0;
-  let tokensSaved = 0;
-  let latest: string | null = null;
-  let hit = false;
-  for (const id of ids) {
-    const b = stats.sessions[id];
-    if (!b) continue;
-    hit = true;
-    calls += b.calls ?? 0;
-    tokensSaved += b.tokensSaved ?? 0;
-    if (b.lastSavingAt && (!latest || b.lastSavingAt > latest)) {
-      latest = b.lastSavingAt;
+  if (!stats) return null;
+  // Primary path: sum across the v2 `sessions` map candidates.
+  if (stats.sessions) {
+    let calls = 0;
+    let tokensSaved = 0;
+    let latest: string | null = null;
+    let hit = false;
+    for (const id of ids) {
+      const b = stats.sessions[id];
+      if (!b) continue;
+      hit = true;
+      calls += b.calls ?? 0;
+      tokensSaved += b.tokensSaved ?? 0;
+      if (b.lastSavingAt && (!latest || b.lastSavingAt > latest)) latest = b.lastSavingAt;
     }
+    if (hit) return { calls, tokensSaved, lastSavingAt: latest };
   }
-  return hit ? { calls, tokensSaved, lastSavingAt: latest } : null;
+  // Fallback: if the file is in v1 shape (zombie pre-v0.8.0 process still
+  // writing), surface the v1 `session` field rather than showing 0. The v1
+  // counter technically lies across concurrent terminals, but "lying
+  // slightly" beats "stuck at 0" for UX. The zombie-writer scenario
+  // resolves once the user fully restarts Claude Code.
+  if (stats.session && typeof stats.session.tokensSaved === "number") {
+    return {
+      calls: stats.session.calls ?? 0,
+      tokensSaved: stats.session.tokensSaved,
+      lastSavingAt: null,
+    };
+  }
+  return null;
 }
 
 interface AshlrSettings {
