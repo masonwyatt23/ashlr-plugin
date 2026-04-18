@@ -23,7 +23,10 @@ import {
   checkDailyCap,
   bumpDailyUsage,
   logLlmCall,
+  tryRecordDailyCapNotification,
+  getUserById,
 } from "../db.js";
+import { sendEmail } from "../lib/email.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -145,6 +148,16 @@ llm.post("/llm/summarize", authMiddleware, async (c) => {
   // --- daily cap check ---
   const cap = checkDailyCap(user.id);
   if (!cap.allowed) {
+    // Send once-per-day notification email (best-effort, non-blocking)
+    if (tryRecordDailyCapNotification(user.id)) {
+      const fullUser = getUserById(user.id);
+      if (fullUser) {
+        void sendEmail("daily-cap-reached", {
+          to:   fullUser.email,
+          data: { email: fullUser.email },
+        });
+      }
+    }
     return c.json({ error: "Daily cap reached. Try again tomorrow.", remaining: cap.remaining }, 429);
   }
 

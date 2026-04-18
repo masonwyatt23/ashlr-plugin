@@ -229,7 +229,37 @@ function runMigrations(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_audit_events_org_at   ON audit_events(org_id, at);
     CREATE INDEX IF NOT EXISTS idx_audit_events_user_at  ON audit_events(user_id, at);
+
+    -- Email: daily cap notification throttle (one email per user per UTC date)
+    CREATE TABLE IF NOT EXISTS daily_cap_notifications (
+      user_id TEXT NOT NULL,
+      date    TEXT NOT NULL,  -- ISO date "YYYY-MM-DD"
+      PRIMARY KEY (user_id, date)
+    );
   `);
+}
+
+// ---------------------------------------------------------------------------
+// Daily cap notification helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true and records the notification if this is the first cap-reached
+ * event for this user today (UTC).  Returns false if already sent today.
+ */
+export function tryRecordDailyCapNotification(userId: string): boolean {
+  const date = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const db = getDb();
+  try {
+    db.run(
+      `INSERT INTO daily_cap_notifications (user_id, date) VALUES (?, ?)`,
+      [userId, date],
+    );
+    return true;
+  } catch {
+    // UNIQUE constraint violation — already sent today
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -30,9 +30,10 @@ import { spawnSync } from "child_process";
 import { formatBaseline, scan } from "../scripts/baseline-scan";
 import { greet as sessionGreet } from "../scripts/session-greet";
 import { initSessionBucket } from "../servers/_stats";
+import { isFirstRun, writeStamp, stampPath } from "../scripts/onboarding-wizard";
 
 export const ACTIVATION_NOTICE =
-  "ashlr-plugin v1.0.0 active — 15 MCP tools, 23 skills, 794 tests. /ashlr-allow to silence prompts, /ashlr-legend for the status-line key, /ashlr-coach for usage nudges, /ashlr-dashboard for the live view.";
+  "ashlr-plugin v1.7.0 active — 17 MCP tools, 26 skills, 841 tests. First-run wizard via /ashlr-start; /ashlr-allow to silence prompts; /ashlr-dashboard for the live view.";
 export const SCAN_BUDGET_MS = 2000;
 
 /**
@@ -178,6 +179,26 @@ export interface BuildResult {
   notice: string | null;
 }
 
+/** Path to the first-run stamp file. Re-exported for tests. */
+export { stampPath, isFirstRun, writeStamp } from "../scripts/onboarding-wizard";
+
+/**
+ * Returns the additionalContext string that fires the onboarding wizard on
+ * first run, or null when the stamp already exists.
+ *
+ * Side effect: writes the stamp on first run so subsequent sessions skip it.
+ */
+export function maybeWizardTrigger(home: string = homedir()): string | null {
+  if (!isFirstRun(home)) return null;
+  writeStamp(home);
+  return (
+    "\n[ashlr] This is your first session with the ashlr-plugin. " +
+    "Please run /ashlr-start now to complete the 60-second onboarding wizard. " +
+    "It will check your setup, offer to approve tool permissions, show a live " +
+    "read demo, and optionally initialize a genome for this project.\n"
+  );
+}
+
 export function buildResponse(opts: BuildOpts = {}): BuildResult {
   const home = opts.home ?? homedir();
   const today = opts.today ?? new Date().toISOString().slice(0, 10);
@@ -193,8 +214,11 @@ export function buildResponse(opts: BuildOpts = {}): BuildResult {
   }
 
   const notice = maybeActivationNotice(home, today);
+  const wizardTrigger = maybeWizardTrigger(home);
 
-  const additionalContext = baselineBlock;
+  const additionalContext = wizardTrigger
+    ? baselineBlock + wizardTrigger
+    : baselineBlock;
 
   return {
     output: {

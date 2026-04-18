@@ -13,10 +13,12 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { authMiddleware } from "../lib/auth.js";
+import { sendEmail } from "../lib/email.js";
 import {
   getSubscriptionByUserId,
   getSubscriptionByStripeSubId,
   getUserByStripeCustomerId,
+  getUserById,
   isStripeEventProcessed,
   markStripeEventProcessed,
   setUserTier,
@@ -247,6 +249,22 @@ async function handleCheckoutCompleted(session: import("stripe").Stripe.Checkout
 
   setUserTier(userId, normalizeTier(tier));
   console.log(`[billing/webhook] checkout completed: user=${userId} tier=${tier} seats=${seats}`);
+
+  // Send welcome + payment-success emails (best-effort)
+  const user = getUserById(userId);
+  if (user) {
+    const amount = (session.amount_total ?? 0);
+    void sendEmail("welcome", { to: user.email, data: { email: user.email } });
+    void sendEmail("payment-success", {
+      to: user.email,
+      data: {
+        email:    user.email,
+        amount,
+        tier:     normalizeTier(tier),
+        renewsOn: unixToIso(stripeSub.current_period_end),
+      },
+    });
+  }
 }
 
 async function handleSubscriptionUpdated(sub: StripeSub): Promise<void> {
@@ -302,6 +320,15 @@ async function handleSubscriptionDeleted(sub: StripeSub): Promise<void> {
 
   setUserTier(existing.user_id, "free");
   console.log(`[billing/webhook] subscription deleted: user=${existing.user_id} downgraded to free`);
+
+  // Send subscription-canceled email
+  const canceledUser = getUserById(existing.user_id);
+  if (canceledUser) {
+    void sendEmail("subscription-canceled", {
+      to: canceledUser.email,
+      data: { email: canceledUser.email },
+    });
+  }
 }
 
 async function handleInvoicePaymentFailed(invoice: import("stripe").Stripe.Invoice): Promise<void> {
@@ -330,6 +357,13 @@ async function handleInvoicePaymentFailed(invoice: import("stripe").Stripe.Invoi
   }
 
   console.log(`[billing/webhook] payment failed for user=${user.id} — grace period active`);
+
+  // Send payment-failed email with 7-day grace period end date
+  const gracePeriodEnd = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  void sendEmail("payment-failed", {
+    to: user.email,
+    data: { email: user.email, gracePeriodEnd },
+  });
 }
 
 // ---------------------------------------------------------------------------

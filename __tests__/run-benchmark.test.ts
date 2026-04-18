@@ -202,12 +202,7 @@ describe("run-benchmark", () => {
     expect(sizes).toContain("large");
   });
 
-  // Skipped in full-suite runs: passes reliably in isolation
-  // (`bun test __tests__/run-benchmark.test.ts`) but fails under the combined
-  // suite because a sibling test leaks HOME/module state that makes the
-  // efficiency-server's snipCompact path no-op. The real benchmark
-  // (docs/benchmarks-v2.json) confirms medium ≈ 0.48, large ≈ 0.035.
-  test.skip("ashlr__edit medium and large samples have ratio < 1 (compression applies to non-trivial edits)", async () => {
+  test("ashlr__edit medium and large samples have ratio < 1 (compression applies to non-trivial edits)", async () => {
     const repo = makeRepo();
     writeFile(repo, "src/x.ts", 3_000);
     gitAddCommit(repo);

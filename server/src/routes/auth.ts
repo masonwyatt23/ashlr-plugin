@@ -7,8 +7,8 @@
 
 import { Hono } from "hono";
 import { z } from "zod";
-import { Resend } from "resend";
 import { cMagicLinksSent } from "../lib/metrics.js";
+import { sendEmail } from "../lib/email.js";
 import {
   getDb,
   getOrCreateUserByEmail,
@@ -25,24 +25,10 @@ import {
 // ---------------------------------------------------------------------------
 
 const FRONTEND_URL   = process.env["FRONTEND_URL"]   ?? "https://plugin.ashlr.ai";
-const RESEND_API_KEY = process.env["RESEND_API_KEY"]  ?? "";
-const TESTING        = process.env["TESTING"] === "1";
 
 const MAGIC_LINK_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const RATE_LIMIT_MAX    = 5;               // requests per email per hour
-
-// ---------------------------------------------------------------------------
-// Resend client (lazy — only initialised when a key is present)
-// ---------------------------------------------------------------------------
-
-let _resend: Resend | null = null;
-
-function getResend(): Resend | null {
-  if (!RESEND_API_KEY) return null;
-  if (!_resend) _resend = new Resend(RESEND_API_KEY);
-  return _resend;
-}
 
 // ---------------------------------------------------------------------------
 // Email sender
@@ -50,30 +36,7 @@ function getResend(): Resend | null {
 
 async function sendMagicLinkEmail(email: string, token: string): Promise<void> {
   const link = `${FRONTEND_URL}/signin/verify?token=${token}`;
-
-  if (TESTING || !RESEND_API_KEY) {
-    // Dev / test mode: log to stderr, never send real email.
-    process.stderr.write(
-      `[ashlr-auth] magic token for ${email}: ${token}\n[ashlr-auth] link: ${link}\n`,
-    );
-    return;
-  }
-
-  const resend = getResend()!;
-  await resend.emails.send({
-    from: "noreply@ashlr.ai",
-    to:   email,
-    subject: "Sign in to ashlr",
-    text: [
-      `Here is your sign-in link:`,
-      ``,
-      link,
-      ``,
-      `This link expires in 15 minutes.`,
-      ``,
-      `If you didn't request this, you can ignore it.`,
-    ].join("\n"),
-  });
+  await sendEmail("magic-link", { to: email, data: { email, link } });
 }
 
 // ---------------------------------------------------------------------------

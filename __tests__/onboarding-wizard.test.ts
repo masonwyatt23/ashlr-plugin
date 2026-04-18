@@ -1,0 +1,325 @@
+/**
+ * Tests for the ashlr onboarding wizard.
+ *
+ * Coverage:
+ *   1. Wizard runs end-to-end in --no-interactive mode and exits 0.
+ *   2. First run (no stamp) → SessionStart emits wizard additionalContext.
+ *   3. Second run (stamp exists) → SessionStart does NOT emit the trigger.
+ *   4. Doctor check detects missing plugin root gracefully.
+ *   5. Permissions check matches install-permissions output shape.
+ *   6. Live-demo step picks a file when cwd has source files; skips otherwise.
+ *   7. Genome offer only appears when cwd has >= 10 files and no genome.
+ *   8. --reset deletes the installed-at stamp.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+
+import {
+  stampPath,
+  isFirstRun,
+  writeStamp,
+  deleteStamp,
+  countSourceFiles,
+  findDemoFile,
+  estimateReadPayload,
+  fileSizeBytes,
+  runDoctorCheck,
+  runWizard,
+  renderDoctorOutput,
+  renderPermissionsSection,
+  renderLiveDemoSection,
+  renderGenomeSection,
+  type DoctorResult,
+} from "../scripts/onboarding-wizard";
+
+import { maybeWizardTrigger } from "../hooks/session-start";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+let tmpHome: string;
+let tmpCwd: string;
+
+beforeEach(async () => {
+  tmpHome = await mkdtemp(join(tmpdir(), "ashlr-wiz-home-"));
+  tmpCwd = await mkdtemp(join(tmpdir(), "ashlr-wiz-cwd-"));
+});
+
+afterEach(async () => {
+  await rm(tmpHome, { recursive: true, force: true });
+  await rm(tmpCwd, { recursive: true, force: true });
+});
+
+/** Capture stdout during a callback. */
+async function captureStdout(fn: () => Promise<void> | void): Promise<string> {
+  const chunks: Buffer[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  // @ts-ignore — patching for test
+  process.stdout.write = (chunk: string | Buffer, ...rest: unknown[]) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    // @ts-ignore
+    process.stdout.write = orig;
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+// ---------------------------------------------------------------------------
+// 1. End-to-end wizard in --no-interactive mode
+// ---------------------------------------------------------------------------
+
+describe("runWizard --no-interactive", () => {
+  test("completes without throwing and emits expected markers", async () => {
+    const output = await captureStdout(async () => {
+      await runWizard({
+        interactive: false,
+        home: tmpHome,
+        cwd: tmpCwd,
+        // Stub out side-effecting calls so tests are hermetic and fast
+        installPermsFn: async () => {},
+        genomeInitFn: async () => {},
+      });
+    });
+
+    // Greeting
+    expect(output).toContain("You just installed ashlr.");
+    // All six step headers
+    expect(output).toContain("STEP 1/6: Doctor check");
+    expect(output).toContain("STEP 2/6: Permissions");
+    expect(output).toContain("STEP 3/6: Live demo");
+    expect(output).toContain("STEP 4/6: Genome");
+    expect(output).toContain("STEP 5/6: Pro plan");
+    expect(output).toContain("STEP 6/6: Done");
+    // Final message
+    expect(output).toContain("Run /ashlr-savings anytime");
+    expect(output).toContain("Happy coding.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. First run → SessionStart emits wizard trigger
+// ---------------------------------------------------------------------------
+
+describe("maybeWizardTrigger", () => {
+  test("first run: no stamp → returns trigger string and writes stamp", () => {
+    expect(isFirstRun(tmpHome)).toBe(true);
+
+    const trigger = maybeWizardTrigger(tmpHome);
+    expect(trigger).not.toBeNull();
+    expect(trigger).toContain("/ashlr-start");
+    expect(trigger).toContain("onboarding wizard");
+
+    // Stamp written
+    expect(existsSync(stampPath(tmpHome))).toBe(true);
+    expect(isFirstRun(tmpHome)).toBe(false);
+  });
+
+  // 3. Second run → no trigger
+  test("second run: stamp present → returns null", () => {
+    writeStamp(tmpHome);
+    const trigger = maybeWizardTrigger(tmpHome);
+    expect(trigger).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Doctor check handles missing plugin root gracefully
+// ---------------------------------------------------------------------------
+
+describe("runDoctorCheck", () => {
+  test("missing plugin root reports issue without throwing", async () => {
+    const result = await runDoctorCheck({
+      home: tmpHome,
+      cwd: tmpCwd,
+      // Supply a non-existent root to exercise the missing-root path
+      pluginRoot: join(tmpCwd, "nonexistent"),
+    });
+
+    expect(result.pluginRoot).toBe(join(tmpCwd, "nonexistent"));
+    // hasDeps will be false when root doesn't exist
+    expect(result.hasDeps).toBe(false);
+    // Issues array should contain at least one entry
+    expect(result.issues.length).toBeGreaterThan(0);
+    const issueText = result.issues.join(" ");
+    expect(issueText.toLowerCase()).toMatch(/plugin root|dependencies|missing/);
+  });
+
+  test("returns genomePresent: true when .ashlrcode/genome exists", async () => {
+    const genomeDir = join(tmpCwd, ".ashlrcode", "genome");
+    mkdirSync(genomeDir, { recursive: true });
+
+    const result = await runDoctorCheck({
+      home: tmpHome,
+      cwd: tmpCwd,
+      pluginRoot: join(tmpCwd, "nonexistent"),
+    });
+    expect(result.genomePresent).toBe(true);
+  });
+
+  test("allowlistOk: true when settings.json has mcp__ashlr-* entry", async () => {
+    const claudeDir = join(tmpHome, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    await writeFile(
+      join(claudeDir, "settings.json"),
+      JSON.stringify({ permissions: { allow: ["mcp__ashlr-*"] } }),
+    );
+
+    const result = await runDoctorCheck({
+      home: tmpHome,
+      cwd: tmpCwd,
+      pluginRoot: join(tmpCwd, "nonexistent"),
+    });
+    expect(result.allowlistOk).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. Permissions section matches install-permissions output shape
+// ---------------------------------------------------------------------------
+
+describe("renderPermissionsSection output", () => {
+  test("when allowlist ok: emits [ASHLR_OK] permissions-ok", async () => {
+    const output = await captureStdout(() => {
+      renderPermissionsSection(true);
+    });
+    expect(output).toContain("[ASHLR_OK] permissions-ok");
+    expect(output).not.toContain("[ASHLR_PROMPT");
+  });
+
+  test("when allowlist missing: emits [ASHLR_PROMPT] with y/n", async () => {
+    const output = await captureStdout(() => {
+      renderPermissionsSection(false);
+    });
+    expect(output).toContain("[ASHLR_PROMPT:");
+    expect(output).toContain("y/n");
+    expect(output).not.toContain("[ASHLR_OK] permissions-ok");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Live demo picks a file; skips when cwd has no source files
+// ---------------------------------------------------------------------------
+
+describe("live demo", () => {
+  test("findDemoFile returns null when no source files exist", () => {
+    // tmpCwd is empty
+    const result = findDemoFile(tmpCwd);
+    expect(result).toBeNull();
+  });
+
+  test("findDemoFile returns a ts file when one is present", async () => {
+    const srcFile = join(tmpCwd, "app.ts");
+    await writeFile(srcFile, "export const x = 1;\n");
+    const result = findDemoFile(tmpCwd);
+    expect(result).toBe(srcFile);
+  });
+
+  test("renderLiveDemoSection emits skip marker when demoFile is null", async () => {
+    const output = await captureStdout(() => {
+      renderLiveDemoSection(null, 0, 0);
+    });
+    expect(output).toContain("[ASHLR_OK] demo-skipped");
+  });
+
+  test("renderLiveDemoSection shows byte counts when file exists", async () => {
+    const srcFile = join(tmpCwd, "big.ts");
+    // Write > 4KB so snip logic kicks in
+    await writeFile(srcFile, "x".repeat(8000));
+    const sizeBytes = fileSizeBytes(srcFile);
+    const payloadBytes = estimateReadPayload(sizeBytes);
+
+    const output = await captureStdout(() => {
+      renderLiveDemoSection(srcFile, sizeBytes, payloadBytes);
+    });
+    expect(output).toContain("Disk size:");
+    expect(output).toContain("ashlr__read:");
+    expect(output).toContain("Saved:");
+    expect(output).toContain("[ASHLR_OK] demo-complete");
+    // Payload should be less than full size for large files
+    expect(payloadBytes).toBeLessThan(sizeBytes);
+  });
+
+  test("estimateReadPayload: small file returns full size", () => {
+    expect(estimateReadPayload(1000)).toBe(1000);
+    expect(estimateReadPayload(4096)).toBe(4096);
+  });
+
+  test("estimateReadPayload: large file returns < 50% of original", () => {
+    const payload = estimateReadPayload(100_000);
+    expect(payload).toBeLessThan(50_000);
+    expect(payload).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Genome offer: only when cwd has >= 10 files and no existing genome
+// ---------------------------------------------------------------------------
+
+describe("genome offer", () => {
+  test("genome offer skipped when < 10 source files", async () => {
+    const output = await captureStdout(() => {
+      renderGenomeSection(5, false);
+    });
+    expect(output).toContain("[ASHLR_OK] genome-skipped-small-repo");
+    expect(output).not.toContain("[ASHLR_PROMPT");
+  });
+
+  test("genome offer skipped when genome already present", async () => {
+    const output = await captureStdout(() => {
+      renderGenomeSection(50, true);
+    });
+    expect(output).toContain("[ASHLR_OK] genome-present");
+    expect(output).not.toContain("[ASHLR_PROMPT");
+  });
+
+  test("genome offer shown when >= 10 files and no genome", async () => {
+    const output = await captureStdout(() => {
+      renderGenomeSection(15, false);
+    });
+    expect(output).toContain("[ASHLR_PROMPT:");
+    expect(output).toContain("genome");
+    expect(output).toContain("15 source files");
+  });
+
+  test("countSourceFiles counts .ts files and ignores node_modules", async () => {
+    mkdirSync(join(tmpCwd, "src"), { recursive: true });
+    mkdirSync(join(tmpCwd, "node_modules", "pkg"), { recursive: true });
+
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(join(tmpCwd, "src", `file${i}.ts`), "");
+    }
+    writeFileSync(join(tmpCwd, "node_modules", "pkg", "index.ts"), "");
+
+    const count = countSourceFiles(tmpCwd);
+    expect(count).toBe(12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. --reset deletes the stamp
+// ---------------------------------------------------------------------------
+
+describe("deleteStamp / --reset", () => {
+  test("deleteStamp removes the stamp file", async () => {
+    writeStamp(tmpHome);
+    expect(isFirstRun(tmpHome)).toBe(false);
+
+    await deleteStamp(tmpHome);
+    expect(isFirstRun(tmpHome)).toBe(true);
+  });
+
+  test("deleteStamp is a no-op when stamp does not exist", async () => {
+    // Should not throw
+    await expect(deleteStamp(tmpHome)).resolves.toBeUndefined();
+    expect(isFirstRun(tmpHome)).toBe(true);
+  });
+});

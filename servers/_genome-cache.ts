@@ -10,12 +10,14 @@
 
 import { statSync } from "fs";
 import { join } from "path";
-import { retrieveSectionsV2 } from "@ashlr/core-efficiency";
+import { retrieveSectionsV2 as _retrieveSectionsV2 } from "@ashlr/core-efficiency";
 
 const CAPACITY = 64;
 
+type Retriever = typeof _retrieveSectionsV2;
+
 interface CacheEntry {
-  result: Awaited<ReturnType<typeof retrieveSectionsV2>>;
+  result: Awaited<ReturnType<Retriever>>;
   manifestMtime: number;
   /** LRU recency counter — higher = more recent. */
   lru: number;
@@ -49,12 +51,18 @@ function evictLRU(): void {
 /**
  * Retrieve genome sections, returning a cached result when the manifest mtime
  * has not changed since the last retrieval for this (genomeRoot, pattern).
+ *
+ * The optional `retriever` parameter exists solely for testing: callers can
+ * inject a stub without needing `mock.module`, which would leak module state
+ * across the full test suite.  Production callers omit it and get the real
+ * `retrieveSectionsV2` from @ashlr/core-efficiency.
  */
 export async function retrieveCached(
   genomeRoot: string,
   pattern: string,
   limit: number,
-): Promise<Awaited<ReturnType<typeof retrieveSectionsV2>>> {
+  retriever: Retriever = _retrieveSectionsV2,
+): Promise<Awaited<ReturnType<Retriever>>> {
   const key = cacheKey(genomeRoot, pattern);
   const mtime = manifestMtime(genomeRoot);
   const entry = cache.get(key);
@@ -66,7 +74,7 @@ export async function retrieveCached(
 
   // Miss or stale — retrieve directly. Never throw.
   try {
-    const result = await retrieveSectionsV2(genomeRoot, pattern, limit);
+    const result = await retriever(genomeRoot, pattern, limit);
     evictLRU();
     cache.set(key, { result, manifestMtime: mtime, lru: ++lruClock });
     return result;

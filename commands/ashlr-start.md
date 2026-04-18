@@ -1,0 +1,60 @@
+---
+name: ashlr-start
+description: >
+  First-run onboarding wizard for the ashlr-plugin. Guides users through
+  doctor check, permissions, a live read demo, genome initialization, and
+  a quick pro teaser — all in under 60 seconds. Run automatically on the
+  first session; re-run manually any time with /ashlr-start.
+  Use /ashlr-start --reset to re-arm the auto-trigger for the next session.
+---
+
+You are running the ashlr first-run onboarding wizard.
+
+## --reset flag
+
+If the user invoked `/ashlr-start --reset`, run:
+
+```sh
+bun run "${CLAUDE_PLUGIN_ROOT}/scripts/onboarding-wizard.ts" --reset
+```
+
+Show the output and stop. Do not run the full wizard.
+
+## Normal wizard flow
+
+1. Run the wizard script:
+
+```sh
+bun run "${CLAUDE_PLUGIN_ROOT}/scripts/onboarding-wizard.ts" --no-interactive
+```
+
+2. Render its output verbatim in a plain code block.
+
+3. After the block, work through each `[ASHLR_PROMPT: ...]` line that
+   appeared in the output. For each one:
+   - Ask the user the exact question shown in the marker.
+   - Wait for their answer (y/n).
+   - If they answer **yes** (or press Enter, treating blank as yes):
+     - For the permissions prompt: run
+       `bun run "${CLAUDE_PLUGIN_ROOT}/scripts/install-permissions.ts"`
+       and show the output.
+     - For the genome prompt: invoke the `/ashlr-genome-init` skill.
+   - If they answer **no**, acknowledge and move on.
+
+4. If any `[ASHLR_WARN] ...` lines appeared, surface the fix instructions
+   clearly but do not block the wizard.
+
+5. After all prompts are resolved, say:
+   "Wizard complete. Run /ashlr-savings any time to see your running
+   totals, or /ashlr-tour for a deeper walkthrough."
+
+## Rules
+
+- Do not run any destructive operation without the user's explicit
+  confirmation at a `[ASHLR_PROMPT]` step.
+- Do not add narration between wizard sections — the script output is
+  the narrative.
+- If the script exits non-zero, show stderr and tell the user to run
+  `/ashlr-doctor` for a full diagnosis.
+- Do not call any tool not listed above during the wizard.
+- Keep responses concise — the wizard output is the substance.

@@ -2,6 +2,36 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.0] — 2026-04-18
+
+**First-impressions polish.** HTML emails, an auto-firing onboarding wizard for new users, and the last two flaky tests actually fixed.
+
+### Added
+
+- **HTML email templates** (`server/src/emails/`) built with `@react-email/components`. Six templates: magic-link, welcome, payment-success, payment-failed, subscription-canceled, daily-cap-reached. Every template renders both HTML and plain text. Parchment palette, Fraunces italic, IBM Plex Sans. Outlook/Gmail/Apple Mail compatible. Subject lines ≤ 70 chars, preheader ≤ 90 chars.
+- **`server/src/lib/email.ts`** — single `sendEmail(template, { to, data })`. Uses Resend; falls back to stderr logging under `TESTING=1` or when `RESEND_API_KEY` is unset. Never throws.
+- **Email wiring**: `magic-link` from `/auth/send`; `welcome` + `payment-success` from `checkout.session.completed` webhook; `payment-failed` from `invoice.payment_failed`; `subscription-canceled` from `customer.subscription.deleted`; `daily-cap-reached` from `/llm/summarize` when cap hit (throttled once-per-day via `daily_cap_notifications` table).
+- **Email preview server**: `bun run server/src/emails/preview.ts` serves every template at `:3333` for local visual QA.
+- **First-run onboarding wizard** (`commands/ashlr-start.md` + `scripts/onboarding-wizard.ts`, 330 LOC). Six steps: doctor check, permissions, live read demo on the user's own cwd file, genome offer (if ≥10 source files + no existing genome), pro teaser, done. Auto-fires on first session via `~/.ashlr/installed-at` stamp detection in `session-start.ts`. 20 new tests.
+- **23 email tests** (`server/tests/emails.test.ts`).
+
+### Fixed
+
+- **Two skipped tests un-skipped** and passing in full-suite runs:
+  - `no-genome grep emits tool_fallback` — un-skipped.
+  - `ashlr__edit medium and large samples have ratio < 1` — un-skipped.
+  - Root cause (`__tests__/genome-cache.test.ts`): used `mock.module("@ashlr/core-efficiency", ...)` at top level, which Bun's test runner writes into the shared module registry and never restores across files. Tests loaded after alphabetically inherited the stub.
+  - Production fix: `servers/_genome-cache.ts` now takes an optional `retriever` parameter (DI). Production callers unchanged.
+  - Test fix: `__tests__/genome-cache.test.ts` replaces `mock.module` with DI.
+- **`docs/test-isolation.md`** — ~80-line note explaining Bun test module-state sharing and the isolation pattern to follow.
+- **`scripts/find-test-leak.ts`** — bisect helper for finding which test file leaks state.
+
+### Tests
+
+- **841 pass, 1 skip, 0 fail** across 53 root test files (+21 since v1.6.0). The last remaining skip is `sql-server.test.ts pgDescribe` — gates on `TEST_DATABASE_URL`, not an isolation issue.
+- **117 pass** (server, +23 email tests).
+
+
 ## [1.6.0] — 2026-04-18
 
 **Team tier features + integration test suite.** Phase 3 CRDT genome sync, Phase 4 policy packs + audit log, end-to-end integration suite.
