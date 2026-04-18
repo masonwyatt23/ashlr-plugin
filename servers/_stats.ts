@@ -75,22 +75,49 @@ function lockPath(): string { return statsPath() + ".lock"; }
 function tempPath(): string { return statsPath() + ".tmp." + process.pid + "." + randomBytes(3).toString("hex"); }
 
 /**
- * Resolve the current session id. Prefers CLAUDE_SESSION_ID (set by Claude
- * Code), falls back to a PPID-derived hash so MCP servers spawned by the
- * same Claude Code process still share a bucket even when the env var
- * isn't forwarded.
+ * Derive the PPID-based fallback session id. Used when CLAUDE_SESSION_ID is
+ * not forwarded to this process (which, as of v0.9.x, is what happens for
+ * MCP server subprocesses Claude Code spawns — it passes the env var to the
+ * status-line and hooks, but NOT to MCP servers).
+ */
+function ppidSessionId(): string {
+  const seed = `ppid:${typeof process.ppid === "number" ? process.ppid : "?"}:${process.env.HOME ?? ""}`;
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
+  return `p${(h >>> 0).toString(16)}`;
+}
+
+/**
+ * Resolve the current session id for WRITERS. Prefers CLAUDE_SESSION_ID
+ * (set by Claude Code for status-line/hook contexts); falls back to a
+ * PPID-derived hash (used by MCP server subprocesses that don't inherit
+ * the env var).
  *
  * NEVER returns an empty string — always a stable identifier.
  */
 export function currentSessionId(): string {
   const explicit = process.env.CLAUDE_SESSION_ID;
   if (explicit && explicit.trim().length > 0) return explicit.trim();
-  // Fallback: deterministic per parent process. Same PPID ⇒ same bucket.
-  // Keeps sibling MCP server writes coherent when CLAUDE_SESSION_ID is absent.
-  const seed = `ppid:${typeof process.ppid === "number" ? process.ppid : "?"}:${process.env.HOME ?? ""}`;
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
-  return `p${(h >>> 0).toString(16)}`;
+  return ppidSessionId();
+}
+
+/**
+ * Resolve the set of session ids this process could belong to, for READERS.
+ * Because Claude Code inconsistently forwards CLAUDE_SESSION_ID (status line
+ * sees it, MCP servers don't), a reader that used only `currentSessionId()`
+ * would miss savings written under the OTHER id.
+ *
+ * The status line calls this and sums across every candidate bucket so the
+ * session counter stays correct regardless of which side CLAUDE_SESSION_ID
+ * reached.
+ */
+export function candidateSessionIds(): string[] {
+  const ids: string[] = [];
+  const explicit = process.env.CLAUDE_SESSION_ID;
+  if (explicit && explicit.trim().length > 0) ids.push(explicit.trim());
+  const ppid = ppidSessionId();
+  if (!ids.includes(ppid)) ids.push(ppid);
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,13 +510,38 @@ export async function initSessionBucket(sessionId: string = currentSessionId()):
 }
 
 /**
- * Drop the current session's bucket (called by SessionEnd GC hook).
- * Prevents unbounded growth of `sessions` over time.
+ * Drop this session's bucket(s) (called by SessionEnd GC hook). Removes every
+ * candidate id so that orphaned buckets (e.g. the MCP-written PPID-hash bucket
+ * when CLAUDE_SESSION_ID was set for the hook but not forwarded to MCP) don't
+ * accumulate. Returns the combined dropped bucket for summary logging.
  */
-export async function dropSessionBucket(sessionId: string = currentSessionId()): Promise<SessionBucket | null> {
+export async function dropSessionBucket(sessionId?: string): Promise<SessionBucket | null> {
+  const ids = sessionId ? [sessionId] : candidateSessionIds();
   return withSerializedWrite(async (s) => {
-    const dropped = s.sessions[sessionId] ?? null;
-    if (dropped) delete s.sessions[sessionId];
+    let calls = 0;
+    let tokensSaved = 0;
+    let startedAt = "";
+    let lastSavingAt: string | null = null;
+    let hit = false;
+    const byTool: ByTool = {};
+    for (const id of ids) {
+      const b = s.sessions[id];
+      if (!b) continue;
+      hit = true;
+      calls += b.calls;
+      tokensSaved += b.tokensSaved;
+      if (!startedAt || b.startedAt < startedAt) startedAt = b.startedAt;
+      if (b.lastSavingAt && (!lastSavingAt || b.lastSavingAt > lastSavingAt)) lastSavingAt = b.lastSavingAt;
+      for (const [tool, pt] of Object.entries(b.byTool)) {
+        const t = byTool[tool] ?? (byTool[tool] = { calls: 0, tokensSaved: 0 });
+        t.calls += pt.calls;
+        t.tokensSaved += pt.tokensSaved;
+      }
+      delete s.sessions[id];
+    }
+    const dropped: SessionBucket | null = hit
+      ? { startedAt: startedAt || new Date().toISOString(), lastSavingAt, calls, tokensSaved, byTool }
+      : null;
     return { result: dropped, updated: s };
   });
 }
@@ -507,9 +559,28 @@ export async function bumpSummarization(field: "calls" | "cacheHits"): Promise<v
  * Convenience read for the status line and /ashlr-savings: returns the
  * current session's bucket (or an empty one if absent).
  */
-export async function readCurrentSession(sessionId: string = currentSessionId()): Promise<SessionBucket> {
+export async function readCurrentSession(sessionId?: string): Promise<SessionBucket> {
   const s = await readStats();
-  return s.sessions[sessionId] ?? emptySession();
+  const ids = sessionId ? [sessionId] : candidateSessionIds();
+  let calls = 0;
+  let tokensSaved = 0;
+  let startedAt = "";
+  let lastSavingAt: string | null = null;
+  const byTool: ByTool = {};
+  for (const id of ids) {
+    const b = s.sessions[id];
+    if (!b) continue;
+    calls += b.calls;
+    tokensSaved += b.tokensSaved;
+    if (!startedAt || b.startedAt < startedAt) startedAt = b.startedAt;
+    if (b.lastSavingAt && (!lastSavingAt || b.lastSavingAt > lastSavingAt)) lastSavingAt = b.lastSavingAt;
+    for (const [tool, pt] of Object.entries(b.byTool)) {
+      const t = byTool[tool] ?? (byTool[tool] = { calls: 0, tokensSaved: 0 });
+      t.calls += pt.calls;
+      t.tokensSaved += pt.tokensSaved;
+    }
+  }
+  return { startedAt: startedAt || new Date().toISOString(), lastSavingAt, calls, tokensSaved, byTool };
 }
 
 /**

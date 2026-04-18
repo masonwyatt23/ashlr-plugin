@@ -32,7 +32,7 @@ import { greet as sessionGreet } from "../scripts/session-greet";
 import { initSessionBucket } from "../servers/_stats";
 
 export const ACTIVATION_NOTICE =
-  "ashlr-plugin v0.9.2 active — 14 MCP tools, real-time counters, ASCII dashboard, activity indicator, SSRF-safe fetch. /ashlr-allow to silence prompts, /ashlr-legend for the status-line key, /ashlr-dashboard for the live view.";
+  "ashlr-plugin v0.9.3 active — session counter now aggregates across all candidate IDs (fixes the \"session stuck at 0\" issue). /ashlr-allow to silence prompts, /ashlr-legend for the status-line key, /ashlr-dashboard for the live view.";
 export const SCAN_BUDGET_MS = 2000;
 
 /**

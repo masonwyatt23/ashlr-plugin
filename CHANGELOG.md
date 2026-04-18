@@ -2,6 +2,24 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.3] — 2026-04-17
+
+**Bugfix: "session counter stuck at 0".** Users reported the status line showed `session +0` even as `lifetime +N` kept ticking up. Root cause: Claude Code forwards `CLAUDE_SESSION_ID` to the status-line/hook contexts but does **not** forward it to MCP server subprocesses. So writers (MCP servers) wrote to a PPID-hash bucket while the reader (status line) queried the CLAUDE_SESSION_ID bucket, and the two never met.
+
+### Fixed
+
+- **Session bucket id divergence** (`servers/_stats.ts`, `scripts/savings-status-line.ts`). New `candidateSessionIds()` helper returns both `CLAUDE_SESSION_ID` (when set) and the PPID-hash fallback. The status line's `pickSession`, `readCurrentSession`, and `dropSessionBucket` all aggregate across every candidate so whichever id the MCP server actually wrote under is picked up. Confirmed by inspecting a live stats.json — the PPID-hash bucket `pa1913b71` that had 2863 tokens was invisible to the status line under the old single-id lookup.
+- **SessionEnd GC leaks** — before, only the primary id's bucket was dropped, leaving the MCP-written PPID-hash bucket orphaned. Now drops every candidate, preventing long-term `sessions` map bloat.
+
+### Tests
+
+- **728 pass, 2 skip, 0 fail**. No test changes required — existing per-session tests (which explicitly set `CLAUDE_SESSION_ID`) still pass because the primary candidate is still `CLAUDE_SESSION_ID` when set.
+
+### Migration notes
+
+- No breaking changes. Existing stats.json files with orphaned PPID-hash buckets will be cleaned up on their next SessionEnd.
+
+
 ## [0.9.2] — 2026-04-17
 
 **Polish release** — code-review + simplifier + security audit on the v0.9.x work. Seven real findings, all fixed. No feature changes.

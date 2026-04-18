@@ -66,25 +66,56 @@ interface Stats {
   };
 }
 
-function currentSessionId(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * Candidate session ids for this process. Claude Code forwards
+ * CLAUDE_SESSION_ID to status-line and hook invocations but NOT to MCP
+ * server subprocesses — so the status line sees one id and the MCP servers
+ * write under a different (PPID-derived) id. Returning both candidates
+ * lets the status line aggregate across whichever bucket actually got
+ * written.
+ */
+function candidateSessionIds(env: NodeJS.ProcessEnv = process.env): string[] {
+  const ids: string[] = [];
   const explicit = env.CLAUDE_SESSION_ID ?? env.ASHLR_SESSION_ID;
-  if (explicit && explicit.trim().length > 0) return explicit.trim();
-  // Fallback to the same PPID-derived hash shape _stats.ts uses so a
-  // terminal without CLAUDE_SESSION_ID still reads its own bucket.
+  if (explicit && explicit.trim().length > 0) ids.push(explicit.trim());
+  // PPID-hash fallback — matches the same shape used by servers/_stats.ts.
   const seed = `ppid:${typeof process.ppid === "number" ? process.ppid : "?"}:${env.HOME ?? ""}`;
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
-  return `p${(h >>> 0).toString(16)}`;
+  const ppidId = `p${(h >>> 0).toString(16)}`;
+  if (!ids.includes(ppidId)) ids.push(ppidId);
+  return ids;
 }
 
-/** Return the current session's counters, or null if unknown. */
-function pickSession(stats: Stats | null, sessionId: string): SessionBucket | null {
-  if (!stats) return null;
-  if (stats.sessions && stats.sessions[sessionId]) return stats.sessions[sessionId]!;
-  // If v1 shape is still on disk, don't use it — the legacy global session
-  // is exactly the counter that lies across terminals. Return null so the
-  // status line shows 0 until the session records something.
-  return null;
+/** Pick the first candidate id that has a bucket — for display/startedAt fields. */
+function currentSessionId(env: NodeJS.ProcessEnv = process.env): string {
+  return candidateSessionIds(env)[0]!;
+}
+
+/**
+ * Return aggregated session counters across every candidate id the current
+ * process could own, or null if no candidate bucket exists. Summing across
+ * candidates ensures the status line reflects the full session even when
+ * CLAUDE_SESSION_ID reached the status line but not the MCP servers (or
+ * vice versa).
+ */
+function pickSession(stats: Stats | null, ids: string[]): SessionBucket | null {
+  if (!stats || !stats.sessions) return null;
+  let calls = 0;
+  let tokensSaved = 0;
+  let latest: string | null = null;
+  let hit = false;
+  for (const id of ids) {
+    const b = stats.sessions[id];
+    if (!b) continue;
+    hit = true;
+    calls += b.calls ?? 0;
+    tokensSaved += b.tokensSaved ?? 0;
+    if (b.lastSavingAt && (!latest || b.lastSavingAt > latest)) {
+      latest = b.lastSavingAt;
+    }
+  }
+  return hit ? { calls, tokensSaved, lastSavingAt: latest } : null;
 }
 
 interface AshlrSettings {
@@ -313,8 +344,8 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
     const showSpark = cfg.statusLineSparkline ?? true;
 
     const stats = readJsonCached<Stats>(join(home, ".ashlr", "stats.json"));
-    const sessionId = currentSessionId(env);
-    const sess = pickSession(stats, sessionId);
+    const sessionIds = candidateSessionIds(env);
+    const sess = pickSession(stats, sessionIds);
     const session = sess?.tokensSaved ?? 0;
     const lifetime = stats?.lifetime?.tokensSaved ?? 0;
     const lastSavingAt = sess?.lastSavingAt ?? null;
