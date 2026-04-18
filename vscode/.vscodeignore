@@ -1,0 +1,14 @@
+# Files excluded from the packaged VSIX
+
+.vscode/**
+src/**
+webview/**
+node_modules/**
+out/**.js.map
+esbuild.config.ts
+tsconfig.json
+test-manual.md
+CHANGELOG.md
+.gitignore
+*.lock
+bun.lockb

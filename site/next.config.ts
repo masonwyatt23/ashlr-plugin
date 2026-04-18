@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { createMDX } from "fumadocs-mdx/next";
+import { withSentryConfig } from "@sentry/nextjs";
 import path from "node:path";
 
 const withMDX = createMDX();
@@ -32,4 +33,11 @@ function withSourceAlias(config: NextConfig): NextConfig {
   };
 }
 
-export default withSourceAlias(withMDX(nextConfig));
+const sentryOptions = {
+  // Only upload source maps when DSN is configured (production builds).
+  silent: true,
+  // Avoid blocking CI builds if Sentry upload fails.
+  dryRun: !process.env["NEXT_PUBLIC_SENTRY_DSN"],
+};
+
+export default withSentryConfig(withSourceAlias(withMDX(nextConfig)), sentryOptions);

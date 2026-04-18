@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { Resend } from "resend";
+import { cMagicLinksSent } from "../lib/metrics.js";
 import {
   getDb,
   getOrCreateUserByEmail,
@@ -144,6 +145,7 @@ router.post("/auth/send", async (c) => {
   createMagicToken(email, token, expiresAt);
 
   // Send email (fire-and-forget errors silently — we never reveal success/failure)
+  cMagicLinksSent.inc();
   try {
     await sendMagicLinkEmail(email, token);
   } catch (err) {

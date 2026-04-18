@@ -18,6 +18,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "crypto";
 import { authMiddleware, requireTier } from "../lib/auth.js";
 import { checkRateLimitBucket } from "../lib/ratelimit.js";
+import { cLlmRequests, hLlmTokens } from "../lib/metrics.js";
 import {
   checkDailyCap,
   bumpDailyUsage,
@@ -200,6 +201,11 @@ llm.post("/llm/summarize", authMiddleware, async (c) => {
   }
 
   const cost = inputTokens * COST_PER_INPUT_TOKEN + outputTokens * COST_PER_OUTPUT_TOKEN;
+
+  // --- metrics ---
+  cLlmRequests.inc({ tier: user.tier });
+  hLlmTokens.observe({ type: "input" }, inputTokens);
+  hLlmTokens.observe({ type: "output" }, outputTokens);
 
   // --- persist cache + accounting (best-effort, non-blocking) ---
   setCached(key, { summary, inputTokens, outputTokens });

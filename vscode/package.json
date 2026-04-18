@@ -1,0 +1,94 @@
+{
+  "name": "ashlr",
+  "displayName": "ashlr — token savings for AI coding",
+  "description": "See tokens and dollars saved by ashlr across every Claude Code / Cursor session. Status bar, savings dashboard, and inline gutter badges.",
+  "version": "0.1.0",
+  "publisher": "ashlrai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ashlar-ai/ashlr-plugin"
+  },
+  "homepage": "https://plugin.ashlr.ai",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "ai",
+    "tokens",
+    "savings",
+    "claude",
+    "cursor",
+    "ashlr",
+    "mcp"
+  ],
+  "icon": "resources/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ashlr.showDashboard",
+        "title": "Show Dashboard",
+        "category": "ashlr"
+      },
+      {
+        "command": "ashlr.openGenomeFolder",
+        "title": "Open Genome Folder",
+        "category": "ashlr"
+      },
+      {
+        "command": "ashlr.runBenchmark",
+        "title": "Run Benchmark",
+        "category": "ashlr"
+      },
+      {
+        "command": "ashlr.showSavings",
+        "title": "Show Savings",
+        "category": "ashlr"
+      },
+      {
+        "command": "ashlr.signInToPro",
+        "title": "Sign in to Pro",
+        "category": "ashlr"
+      }
+    ],
+    "configuration": {
+      "title": "ashlr",
+      "properties": {
+        "ashlr.statsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to stats.json. Defaults to ~/.ashlr/stats.json when empty."
+        },
+        "ashlr.pollIntervalMs": {
+          "type": "number",
+          "default": 2000,
+          "description": "How often (ms) to poll stats.json for status bar updates."
+        },
+        "ashlr.showGutterBadges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline savings estimate badges next to Read/Edit tool calls."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun run esbuild.config.ts",
+    "watch": "bun run esbuild.config.ts --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.21.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}

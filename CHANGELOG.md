@@ -2,6 +2,54 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.0] — 2026-04-18
+
+**VS Code extension, backend observability, launch content kit.** The plugin expands to a new host, the backend gets real eyes on errors and metrics, and every piece of launch-day copy is written.
+
+### Added
+
+- **VS Code extension** (`vscode/`, 1,210 LOC source → 21 KB bundle). Status bar with 2 s polling of `~/.ashlr/stats.json`. Dashboard webview with parchment theme. Inline gutter decorations on Read/Edit/Grep calls. Five commands: Show Dashboard, Open Genome Folder, Run Benchmark, Show Savings, Sign in to Pro. Settings: stats path, poll interval, show gutter badges. Manifest validates cleanly for `vsce package`.
+- **Backend observability**:
+  - **Sentry** via `@sentry/bun`. Error middleware wired to Hono `app.onError`. PII scrubbed (`text`, `systemPrompt`, `email`, `authorization`, `cookie`, `password`) via `beforeSend`. Release tagging. No-op without `SENTRY_DSN`.
+  - **Structured logging** via `pino` + `pino-http`. JSON in production, pretty in dev. Every HTTP request: method, path, status, latency, user_id, requestId.
+  - **Prometheus metrics** at `GET /metrics`. Gauges (users_total, subscriptions_active), counters (http_requests_total, llm_requests_total, magic_links_sent_total), histograms (http_request_duration_seconds, llm_request_tokens). Gated by IP allowlist or Basic Auth.
+  - **`/healthz` + `/readyz`** liveness + readiness probes. Fly.io health check updated.
+  - **`docs/operations.md`** — monitoring guide, alert thresholds, runbooks for DB down / Anthropic failure / Stripe webhook lag / rate-limit flood.
+  - **Client Sentry** on the site at `/dashboard`, `/signin/*`, `/billing/*` only (marketing pages skipped to reduce noise).
+- **Launch content kit**:
+  - `docs/launch-post.md` — ~920-word blog post telling the v0.6 → v1.4 story.
+  - `docs/producthunt.md` — PH tagline, description, first comment, gallery captions.
+  - `docs/social.md` — three Twitter variants, LinkedIn draft, HN title + first comment.
+  - `site/app/compare/page.tsx` — 20-row comparison matrix vs WOZCODE / native Claude Code / Cursor. Honest marks only ("unknown" where truly unknown).
+  - `docs/hero-video-script.md` — 30-second product video brief.
+  - `docs/press-kit/` — logo SVG, screenshot shot-list, founder bio, fact sheet.
+
+### Tests
+
+- **867 pass, 2 skip, 0 fail** (root, +7 since v1.4).
+- **60 pass** (server, +7 observability).
+- VS Code extension builds clean; manual QA checklist at `vscode/test-manual.md`.
+
+### Deps
+
+- `server/`: `@sentry/bun`, `pino`, `pino-http`, `prom-client`, `pino-pretty` (dev).
+- `site/`: `@sentry/nextjs`.
+- `vscode/`: self-contained; no root pollution.
+
+### New envvars (all opt-in)
+
+| Var | Where | Purpose |
+|---|---|---|
+| `SENTRY_DSN` | server | Sentry error tracking |
+| `METRICS_ALLOWED_IPS` or `METRICS_USER` + `METRICS_PASS` | server | gate `/metrics` |
+| `LOG_LEVEL` | server | Pino level override |
+| `NEXT_PUBLIC_SENTRY_DSN` | site | client-side Sentry |
+
+### Before-launch content review
+
+Items in `docs/producthunt.md` and `docs/social.md` use exact numbers from `docs/benchmarks-v2.json` (−71.3% overall). WOZCODE comparison cells are marked "unknown" where no public data exists — verify before publish if you have internal data.
+
+
 ## [1.4.0] — 2026-04-18
 
 **Launch-ready.** Magic-link auth, legal pages, reproducible benchmarks surface.

@@ -23,8 +23,8 @@ primary_region = "iad"
   cpus = 1
 
 [[http_service.checks]]
-  grace_period = "5s"
+  grace_period = "10s"
   interval = "15s"
   method = "GET"
-  path = "/"
+  path = "/readyz"
   timeout = "5s"
