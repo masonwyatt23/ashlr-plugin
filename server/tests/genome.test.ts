@@ -307,6 +307,42 @@ describe("genome sync", () => {
     expect(over.status).toBe(429);
   });
 
+  // 16. encryption_required rejects plaintext push
+  it("encryption_required=true rejects a plaintext section push", async () => {
+    const admin = makeUser("encadmin@example.com", "team");
+    // Grant admin role
+    const db = (await import("../src/db.js")).getDb();
+    db.run(`UPDATE users SET org_role = 'admin' WHERE id = ?`, [admin.id]);
+
+    const { genomeId } = await (await post("/genome/init", { orgId: "org-enc", repoUrl: "https://r-enc" }, admin.api_token)).json() as { genomeId: string };
+
+    // Enable encryption_required
+    const settingsRes = await app.request(`/genome/${genomeId}/settings`, {
+      method:  "PATCH",
+      headers: { Authorization: `Bearer ${admin.api_token}`, "Content-Type": "application/json" },
+      body:    JSON.stringify({ encryption_required: true }),
+    });
+    expect(settingsRes.status).toBe(200);
+
+    // Plaintext push should be rejected with 422
+    const plainPush = await post(`/genome/${genomeId}/push`, {
+      clientId: "c1",
+      sections: [{ path: "sections/secret.md", content: "# This is plaintext", vclock: { c1: 1 } }],
+    }, admin.api_token);
+    expect(plainPush.status).toBe(422);
+    const body = await plainPush.json() as { error: string };
+    expect(body.error).toMatch(/Encryption required/);
+
+    // A valid-looking ciphertext blob (base64url, ≥39 chars) should be accepted
+    // Use a realistic-length blob (1 + 12 + 16 + 4 bytes of ciphertext = 33 bytes → 44 base64url chars)
+    const fakeCipher = Buffer.alloc(33, 0xab).toString("base64url");
+    const cipherPush = await post(`/genome/${genomeId}/push`, {
+      clientId: "c1",
+      sections: [{ path: "sections/secret.md", content: fakeCipher, vclock: { c1: 1 } }],
+    }, admin.api_token);
+    expect(cipherPush.status).toBe(200);
+  });
+
   // 15. Concurrent edit from two different clients → both sides in conflict
   it("concurrent edit from two clients → conflict with both variants", async () => {
     const user = makeUser("concurrent@example.com", "team");

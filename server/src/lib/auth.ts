@@ -44,6 +44,15 @@ export function requireTier(
   ) as Response;
 }
 
+/**
+ * requireAdmin — returns 403 if the user does not have is_admin=1.
+ * Call after authMiddleware so c.get("user") is populated.
+ */
+export function requireAdmin(c: Context, user: User): Response | undefined {
+  if (user.is_admin === 1) return undefined;
+  return c.json({ error: "Admin access required." }, 403) as Response;
+}
+
 export async function authMiddleware(c: Context, next: Next): Promise<Response | void> {
   const header = c.req.header("Authorization");
   if (!header || !header.startsWith("Bearer ")) {

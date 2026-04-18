@@ -31,10 +31,24 @@ import {
   getGenomeConflicts,
   upsertGenomeConflict,
   resolveGenomeConflict,
+  setEncryptionRequired,
   logGenomePush,
   countRecentGenomePushes,
   type GenomeSection,
 } from "../db.js";
+
+// ---------------------------------------------------------------------------
+// Encryption detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the content string looks like an AES-256-GCM ciphertext blob.
+ * Format: base64url of [ version(1) | nonce(12) | authTag(16) | ciphertext(var) ]
+ * Minimum encoded length for empty plaintext: ceil((1+12+16)*8/6) = 39 chars.
+ */
+function looksEncrypted(content: string): boolean {
+  return /^[A-Za-z0-9_-]{39,}$/.test(content);
+}
 
 const genome = new Hono();
 
@@ -133,7 +147,7 @@ const ResolveSchema = z.object({
 // Middleware: all genome routes need auth + team tier
 // ---------------------------------------------------------------------------
 
-genome.use("*", authMiddleware);
+genome.use("/genome/*", authMiddleware);
 
 // ---------------------------------------------------------------------------
 // POST /genome/init
@@ -187,6 +201,18 @@ genome.post("/genome/:genomeId/push", async (c) => {
     return c.json({ error: "Push rate limit exceeded (10 sections/minute)" }, 429);
   }
 
+  // Encryption enforcement: if the genome requires encryption, reject plaintext pushes
+  if (g.encryption_required === 1) {
+    for (const sec of sections) {
+      if (!looksEncrypted(sec.content)) {
+        return c.json(
+          { error: `Encryption required: section '${sec.path}' must be encrypted before push` },
+          422,
+        );
+      }
+    }
+  }
+
   const applied: string[] = [];
   const conflicts: string[] = [];
 
@@ -197,6 +223,7 @@ genome.post("/genome/:genomeId/push", async (c) => {
 
     const existing = getGenomeSectionByPath(genomeId, sec.path);
     const incomingVclock = sec.vclock as VClock;
+    const isEncrypted = looksEncrypted(sec.content);
 
     let finalContent = sec.content;
     let finalVclock  = incomingVclock;
@@ -242,7 +269,7 @@ genome.post("/genome/:genomeId/push", async (c) => {
     }
 
     const seq = bumpGenomeSeq(genomeId);
-    upsertGenomeSection(genomeId, sec.path, finalContent, JSON.stringify(finalVclock), isConflict, seq);
+    upsertGenomeSection(genomeId, sec.path, finalContent, JSON.stringify(finalVclock), isConflict, seq, isEncrypted);
     logGenomePush(genomeId, clientId, sec.path);
   }
 
@@ -269,11 +296,12 @@ genome.get("/genome/:genomeId/pull", async (c) => {
   const rows = getGenomeSectionsSince(genomeId, since);
 
   const sections = rows.map((r: GenomeSection) => ({
-    path:         r.path,
-    content:      r.content,
-    vclock:       (() => { try { return JSON.parse(r.vclock_json); } catch { return {}; } })(),
-    conflictFlag: r.conflict_flag === 1,
-    serverSeq:    r.server_seq,
+    path:              r.path,
+    content:           r.content,
+    content_encrypted: r.content_encrypted === 1,
+    vclock:            (() => { try { return JSON.parse(r.vclock_json); } catch { return {}; } })(),
+    conflictFlag:      r.conflict_flag === 1,
+    serverSeq:         r.server_seq,
   }));
 
   return c.json({ sections, serverSeqNum: g.server_seq });
@@ -326,10 +354,45 @@ genome.post("/genome/:genomeId/resolve", async (c) => {
   if (!isValidSectionPath(path)) return c.json({ error: "Invalid section path" }, 400);
 
   const seq = bumpGenomeSeq(genomeId);
-  upsertGenomeSection(genomeId, path, winning.content, JSON.stringify(winning.vclock), false, seq);
+  upsertGenomeSection(genomeId, path, winning.content, JSON.stringify(winning.vclock), false, seq, looksEncrypted(winning.content));
   resolveGenomeConflict(genomeId, path);
 
   return c.json({ ok: true, serverSeq: seq });
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /genome/:genomeId/settings — org admins can set encryption_required
+// ---------------------------------------------------------------------------
+
+const SettingsSchema = z.object({
+  encryption_required: z.boolean().optional(),
+});
+
+genome.patch("/genome/:genomeId/settings", async (c) => {
+  const user = c.get("user");
+  const deny = requireTier(c, user, "team");
+  if (deny) return deny;
+
+  // Only org admins may change genome settings
+  if (user.org_role !== "admin") {
+    return c.json({ error: "Admin role required to change genome settings" }, 403);
+  }
+
+  const genomeId = c.req.param("genomeId");
+  const g = getGenomeById(genomeId);
+  if (!g) return c.json({ error: "Genome not found" }, 404);
+
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON" }, 400); }
+
+  const parsed = SettingsSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid body" }, 400);
+
+  if (parsed.data.encryption_required !== undefined) {
+    setEncryptionRequired(genomeId, parsed.data.encryption_required);
+  }
+
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

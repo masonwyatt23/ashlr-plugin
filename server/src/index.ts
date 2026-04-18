@@ -28,6 +28,9 @@ import genomeRouter  from "./routes/genome.js";
 import authRouter    from "./routes/auth.js";
 import policyRouter  from "./routes/policy.js";
 import auditRouter   from "./routes/audit.js";
+import statusRouter  from "./routes/status.js";
+import { startHealthCheckWorker } from "./workers/health-check.js";
+import adminRouter   from "./routes/admin.js";
 
 import { initSentry, sentryErrorHandler } from "./lib/sentry.js";
 import { httpLogger, logger } from "./lib/logger.js";
@@ -129,6 +132,8 @@ app.route("/", billingRouter);
 app.route("/", genomeRouter);
 app.route("/", policyRouter);
 app.route("/", auditRouter);
+app.route("/", statusRouter);
+app.route("/", adminRouter);
 
 // 404 fallback
 app.notFound((c) => c.json({ error: "Not found" }, 404));
@@ -147,4 +152,5 @@ export default app;
 if (import.meta.main) {
   Bun.serve({ fetch: app.fetch, port: PORT });
   logger.info({ port: PORT, version: pluginVersion }, "ashlr-server started");
+  startHealthCheckWorker();
 }

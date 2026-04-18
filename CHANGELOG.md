@@ -2,6 +2,32 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.8.0] — 2026-04-18
+
+**Enterprise posture.** Client-side genome encryption, a real admin dashboard, and a public status page.
+
+### Added
+
+- **Client-side genome encryption** (`servers/_genome-crypto.ts`, 210 LOC; `scripts/genome-key.ts` CLI). AES-256-GCM with per-section random nonces. Keys live at `~/.ashlr/team-keys/<id>.key`, mode 0600. Server never sees plaintext — stores ciphertext in a `content_encrypted` column, enforces via new `encryption_required` per-genome flag. `PATCH /genome/:id/settings` endpoint. `scripts/genome-key.ts` supports `generate`, `export`, `import`, `rotate`. Backwards compatible with existing plaintext genomes. 12 new crypto tests + 4 integration tests.
+- **Admin dashboard** (`site/app/admin/*`, ~800 LOC + 9 backend endpoints at `server/src/routes/admin.ts`). Routes: `/admin/overview` (MRR, active subscriptions, DAU, LLM sparkline, recent signups + payments), `/admin/users` (searchable, email-redacted list), `/admin/users/[id]` (full detail + comp/refund modals), `/admin/revenue`, `/admin/errors` (Sentry), `/admin/audit`, `/admin/broadcast`. Bootstrap via `bun run server/src/cli/make-admin.ts <email>`. All mutations write to the audit log. 14 new admin tests.
+- **Public status page** (`site/app/status/*` + `server/src/routes/status.ts`). Overall status strip, per-component 90-day uptime bars, recent incidents with update timeline, email subscribe with double-opt-in, RSS feed at `/status/rss.xml`. Synthetic health-check worker at `server/src/workers/health-check.ts` probes each component every 60s. Incident CRUD via admin-authed `POST /status/incident` + `PATCH /status/incident/:id`. 11 new status tests.
+- **`status-confirm` email template** for the status page subscribe flow.
+
+### Fixed
+
+- **Wildcard-middleware bug in `server/src/routes/genome.ts`** (`use("*", authMiddleware)` intercepted every unmatched request app-wide when mounted at root — fixed to `use("/genome/*", authMiddleware)`).
+
+### Database
+
+Extended `server/src/db.ts` with: `health_checks`, `incidents`, `incident_updates`, `status_subscribers`, plus `users.is_admin` and `users.comp_expires_at` columns. All idempotent late-migration.
+
+### Tests
+
+- **858 pass, 1 skip, 0 fail** (root, +17 since v1.7.0).
+- **143 pass** (server, +26 admin + status + genome encrypted).
+- Clean site build with new `/admin/*` and `/status/*` routes.
+
+
 ## [1.7.0] — 2026-04-18
 
 **First-impressions polish.** HTML emails, an auto-firing onboarding wizard for new users, and the last two flaky tests actually fixed.

@@ -70,6 +70,18 @@ import DailyCapReachedEmail, {
   type DailyCapReachedEmailProps,
 } from "../emails/daily-cap-reached.js";
 
+import StatusConfirmEmail, {
+  subject as statusConfirmSubject,
+  plainText as statusConfirmPlain,
+  type StatusConfirmEmailProps,
+} from "../emails/status-confirm.js";
+
+import BroadcastEmail, {
+  subjectFor as broadcastSubject,
+  plainText as broadcastPlain,
+  type BroadcastEmailProps,
+} from "../emails/broadcast.js";
+
 // ---------------------------------------------------------------------------
 // Discriminated union: template name → data type
 // ---------------------------------------------------------------------------
@@ -81,6 +93,8 @@ export type TemplateMap = {
   "payment-failed":        PaymentFailedEmailProps;
   "subscription-canceled": SubscriptionCanceledEmailProps;
   "daily-cap-reached":     DailyCapReachedEmailProps;
+  "status-confirm":        StatusConfirmEmailProps;
+  "broadcast":             BroadcastEmailProps;
 };
 
 export type TemplateName = keyof TemplateMap;
@@ -123,6 +137,16 @@ async function renderTemplate<T extends TemplateName>(
       const d = data as DailyCapReachedEmailProps;
       const html = await render(React.createElement(DailyCapReachedEmail, d));
       return { subject: dailyCapReachedSubject, html, text: dailyCapReachedPlain(d) };
+    }
+    case "status-confirm": {
+      const d = data as StatusConfirmEmailProps;
+      const html = await render(React.createElement(StatusConfirmEmail, d));
+      return { subject: statusConfirmSubject, html, text: statusConfirmPlain(d) };
+    }
+    case "broadcast": {
+      const d = data as BroadcastEmailProps;
+      const html = await render(React.createElement(BroadcastEmail, d));
+      return { subject: broadcastSubject(d), html, text: broadcastPlain(d) };
     }
     default:
       throw new Error(`Unknown email template: ${String(name)}`);

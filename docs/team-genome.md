@@ -376,8 +376,6 @@ Code sessions simultaneously on the same repo.
 
 ### Security
 
-**Content is stored in plaintext on the ashlr backend.**
-
 - All requests are authenticated with a bearer token (`ASHLR_PRO_TOKEN`).
 - Section paths are sanitized server-side: `..`, absolute paths, and `//`
   patterns are rejected with HTTP 400.
@@ -385,7 +383,146 @@ Code sessions simultaneously on the same repo.
 - Push calls are rate-limited to 10 sections per minute per client.
 - Every push is written to an audit log (`genome_push_log`) for Phase 4 audit
   trail integration.
-- **Client-side encryption is deferred to v2.** Teams should opt in knowing that
-  genome section content (code summaries, architecture notes) is readable by
-  ashlr infrastructure. Do not store secrets in genome sections.
+- **Client-side AES-256-GCM encryption is available.** When a team key is
+  present at `~/.ashlr/team-keys/<genomeId>.key`, section content is encrypted
+  before upload and decrypted after pull. The server stores only ciphertext and
+  cannot read section content. See the encryption section below.
+
+---
+
+## Client-side encryption (v1)
+
+### Threat model
+
+| Threat | Mitigation |
+|--------|-----------|
+| Server operator reads section content | Ciphertext only on server; key never leaves client machines |
+| Network observer | TLS + client-side encryption (defence-in-depth) |
+| Compromised Redis / S3 / Postgres | Only ciphertext stored; useless without the key |
+| User leaves team | Rotate the key; ex-member cannot decrypt new sections |
+| Tampered ciphertext | AES-256-GCM auth tag — decryption throws on any modification |
+
+Vector clock (vclock) metadata is transmitted in plaintext so the server can
+perform conflict detection without decrypting content.
+
+### Algorithm
+
+- **AES-256-GCM** with a 256-bit key and a 96-bit (12-byte) random nonce per section push.
+- The 128-bit GCM authentication tag is verified on every decrypt — any tampering throws.
+- Wire format (base64url): `[ version(1 byte) | nonce(12 bytes) | authTag(16 bytes) | ciphertext ]`
+
+### Key setup
+
+Generate a team key once and save it locally:
+
+```bash
+bun run scripts/genome-key.ts generate <genomeId>
+# Key saved to ~/.ashlr/team-keys/<genomeId>.key (mode 0600)
+```
+
+Share it with each team member over a secure channel (Signal, 1Password, etc.):
+
+```bash
+# On machine with key:
+bun run scripts/genome-key.ts export <genomeId>
+# Prints base32-encoded key after confirmation prompt
+
+# On each team member's machine:
+bun run scripts/genome-key.ts import <genomeId> <BASE32_KEY>
+```
+
+Once the key file exists at `~/.ashlr/team-keys/<genomeId>.key`, every push is
+automatically encrypted and every pull automatically decrypted. No other
+configuration is needed.
+
+### Key file location and permissions
+
+```
+~/.ashlr/team-keys/<genomeId>.key   — 32 raw bytes, mode 0600 (owner read/write only)
+```
+
+The file is never logged, never included in git, and never transmitted to the
+server. It lives only on developer machines.
+
+### Key rotation
+
+When a team member leaves or a key may be compromised, rotate the key. This
+re-encrypts all sections on the server with a new key:
+
+```bash
+bun run scripts/genome-key.ts rotate <genomeId>
+```
+
+The rotate command:
+1. Pulls all sections from the remote.
+2. Decrypts each with the current key.
+3. Generates a new 32-byte key.
+4. Re-encrypts all sections with the new key and pushes them.
+5. Saves the new key file locally.
+
+After rotation, distribute the new key to all remaining team members:
+
+```bash
+bun run scripts/genome-key.ts export <genomeId>
+```
+
+Members who do not receive the new key will see a warning on pull and their
+local copy of those sections will not be updated until they import the new key.
+
+### Enforcing encryption org-wide
+
+Org admins can mark a genome as requiring encryption. Pushes from clients
+without a key (plaintext content) will be rejected with HTTP 422:
+
+```bash
+curl -X PATCH https://api.ashlr.ai/genome/$GENOME_ID/settings \
+  -H "Authorization: Bearer $ASHLR_PRO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"encryption_required": true}'
+```
+
+### Backward compatibility
+
+The server stores a `content_encrypted` boolean per section. Existing plaintext
+sections remain readable by old clients without keys. Mixed teams (some members
+with keys, some without) are supported — members without a key simply cannot
+read encrypted sections. `encryption_required=true` enforces a clean cutover.
+
+### Migration from plaintext to encrypted
+
+For an existing team genome that has been syncing in plaintext:
+
+1. Generate and distribute a key to all team members (see Key setup above).
+2. Run `bun run scripts/genome-key.ts rotate <genomeId>` — this re-encrypts
+   all existing plaintext sections on the server.
+3. Optionally set `encryption_required: true` to prevent future plaintext pushes.
+
+---
+
+## Multi-user encryption model (v2, not yet shipped)
+
+The v1 model uses a single shared symmetric key. This is simple but requires
+out-of-band key distribution and a full rotate when any member leaves.
+
+The v2 model uses asymmetric key wrapping (X25519 / HKDF):
+
+1. **Each member** generates an X25519 keypair. The public key is registered
+   with the genome on the server.
+2. **The genome** has one symmetric data-encryption key (DEK), the same
+   AES-256-GCM key used in v1.
+3. **Key envelopes**: the DEK is encrypted once per member using that member's
+   X25519 public key (via ECDH + HKDF). The server stores the envelope set:
+   `{ memberId → encrypt(memberPublicKey, DEK) }`.
+4. **Adding a member**: admin fetches the DEK (decrypts with their own
+   envelope), re-wraps it to the new member's public key, pushes a new
+   envelope. No re-encryption of section content needed.
+5. **Removing a member**: admin removes the member's envelope and rotates the
+   DEK (same as v1 rotate, but the new DEK is then wrapped for all remaining
+   members). The removed member's envelope is gone; they cannot decrypt the
+   new DEK.
+6. **Decryption on pull**: client fetches its envelope, decrypts the DEK, then
+   decrypts sections exactly as in v1.
+
+Migration from v1 to v2 is non-breaking: the section wire format and
+`serializeBlob` encoding are unchanged. Only key delivery changes.
 
