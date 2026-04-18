@@ -15,6 +15,7 @@ import badgeRouter   from "./routes/badge.js";
 import statsRouter   from "./routes/stats.js";
 import llmRouter     from "./routes/llm.js";
 import billingRouter from "./routes/billing.js";
+import authRouter    from "./routes/auth.js";
 
 const app = new Hono();
 
@@ -32,6 +33,7 @@ app.use(
 app.get("/", (c) => c.json({ ok: true, service: "ashlr-server", phase: 1 }));
 
 // Mount routers
+app.route("/", authRouter);
 app.route("/", badgeRouter);
 app.route("/", statsRouter);
 app.route("/", llmRouter);

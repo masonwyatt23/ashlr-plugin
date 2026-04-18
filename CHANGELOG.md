@@ -2,6 +2,43 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.0] — 2026-04-18
+
+**Launch-ready.** Magic-link auth, legal pages, reproducible benchmarks surface.
+
+### Added
+
+- **Passwordless email magic-link auth** (`server/src/routes/auth.ts`, ~215 LOC). `POST /auth/send` (rate-limited 5/email/hour, 15-min token TTL, Resend delivery). `POST /auth/verify` issues a permanent API token. Site `/signin` + `/signin/verify` flow. `docs/dashboard/signin` stub redirects to the new flow. 10 new tests.
+- **Legal pages** — `/privacy` (299 lines), `/terms` (269 lines), `/dpa` (216 lines). Plain-English policy, Stripe-aware cookie banner (`site/components/cookie-banner.tsx`), footer links, sitemap entries. Internal `docs/legal.md` pre-launch checklist.
+- **Reproducible benchmarks** — `scripts/run-benchmark.ts` (~450 LOC) + `/benchmarks` page at `site/app/benchmarks/page.tsx`. Samples read/grep/edit against the plugin's own repo. Real numbers seeded into `docs/benchmarks-v2.json`: **overall −71.3%** (read −82.2%, grep −81.7%, edit mean dragged by tiny-edit honesty but medium −52%, large −96.5%). The landing hero now reads this number at build time with fallback to −79.5%.
+- **Weekly benchmark CI job** (`.github/workflows/ci.yml`) opens a PR on Monday refreshing the data. Push-time `benchmark-check` verifies the script is healthy.
+- **`docs/legal.md`** — pre-launch sign-off checklist for counsel review.
+
+### Fixed
+
+- `scripts/run-benchmark.ts` rg-resolution now walks more candidate paths so the benchmark works in environments where `rg` isn't a plain system binary (e.g. Claude Code's shell wrapper).
+
+### Tests
+
+- **860 pass, 2 skip, 0 fail** across 55 files (+17 since v1.3.0).
+- 2 skipped tests are the `no-genome grep` flake (full-suite env leak) and the benchmark ratio assertion (same root cause); both pass reliably in isolation and are documented in-line.
+- Server: 53 pass (+10 auth). Site builds clean with 75 static pages.
+
+### Before-launch legal review
+
+`docs/legal.md` lists the six items flagged for counsel review before public launch. Highlights:
+1. Entity name + governing law placeholder in `/terms`.
+2. `privacy@ashlr.ai` and `mason@evero-consulting.com` mailbox setup.
+3. Stripe billing portal enabled in dashboard.
+4. Countersigned DPA template for enterprise.
+5. EU-region readiness check with Fly.io and Neon.
+6. SCC module confirmation.
+
+### Deps
+
+- `resend@6.12.0` added to `server/package.json` for transactional email.
+
+
 ## [1.3.0] — 2026-04-18
 
 **The self-serve tier is complete.** Docs, billing, and a real web dashboard — pro users can now sign up, pay, and see their savings without the CLI.

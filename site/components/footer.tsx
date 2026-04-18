@@ -112,6 +112,38 @@ export default function Footer() {
                 Enterprise
               </a>
             </div>
+
+            <div className="flex flex-col gap-2">
+              <span className="mono-label mb-1" style={{ fontSize: 10 }}>Legal</span>
+              <Link
+                href="/privacy"
+                className="font-mono text-[12px] hover:text-[var(--debit)] transition-colors"
+                style={{ color: "var(--ink-55)" }}
+              >
+                Privacy
+              </Link>
+              <Link
+                href="/terms"
+                className="font-mono text-[12px] hover:text-[var(--debit)] transition-colors"
+                style={{ color: "var(--ink-55)" }}
+              >
+                Terms
+              </Link>
+              <Link
+                href="/dpa"
+                className="font-mono text-[12px] hover:text-[var(--debit)] transition-colors"
+                style={{ color: "var(--ink-55)" }}
+              >
+                DPA
+              </Link>
+              <a
+                href="mailto:privacy@ashlr.ai"
+                className="font-mono text-[12px] hover:text-[var(--debit)] transition-colors"
+                style={{ color: "var(--ink-55)" }}
+              >
+                privacy@ashlr.ai
+              </a>
+            </div>
           </nav>
         </div>
 

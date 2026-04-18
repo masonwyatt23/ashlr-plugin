@@ -15,6 +15,34 @@ This document covers end-to-end deployment of the ashlr site (Vercel) and API se
 
 ---
 
+## Signing up — email setup (Resend)
+
+ashlr uses [Resend](https://resend.com) to send magic-link sign-in emails from
+`noreply@ashlr.ai`. Before users can self-serve sign up, a domain-verified
+sender must be configured:
+
+1. Create a Resend account at https://resend.com and add your sending domain
+   (e.g. `ashlr.ai`). Follow their
+   [domain verification guide](https://resend.com/docs/dashboard/domains/introduction)
+   to add the required DNS records (SPF, DKIM, DMARC).
+2. Once the domain is verified, create an API key in the Resend dashboard
+   (Developers > API Keys). Scope it to "Sending access" only.
+3. Store the key as a Fly.io secret alongside your other server secrets:
+   ```
+   fly secrets set RESEND_API_KEY=re_...
+   ```
+4. Set the `FRONTEND_URL` secret to your site origin so magic-link URLs point
+   to the right place (default: `https://plugin.ashlr.ai`):
+   ```
+   fly secrets set FRONTEND_URL=https://plugin.ashlr.ai
+   ```
+
+**Dev / test mode:** If `RESEND_API_KEY` is unset, or if `TESTING=1`, no email
+is sent. The magic token is printed to stderr instead — safe for local
+development and CI.
+
+---
+
 ## Stripe webhook setup
 
 After deploying the API server, register the billing webhook in the Stripe dashboard:

@@ -14,6 +14,27 @@ the integration architecture, and what happens at each lifecycle event.
 Free users who attempt to use gated endpoints receive HTTP 403 with
 `{ "error": "This feature requires a paid plan.", "upgrade_url": "/billing/checkout" }`.
 
+## How users get access
+
+Users sign up and sign in through a passwordless magic-link flow:
+
+1. Visit `/signin` on the site and enter an email address.
+2. The backend creates a user record (if new) and sends a one-time link via
+   [Resend](https://resend.com). The link is valid for 15 minutes.
+3. Clicking the link calls `POST /auth/verify`, which issues a permanent API
+   token and stores it in the user's browser (`localStorage`). The token is
+   used as a `Bearer` credential for all subsequent API calls.
+4. To upgrade to Pro or Team, the user visits `/pricing` and completes a
+   Stripe Checkout session. The webhook at `POST /billing/webhook` promotes the
+   user's tier in the database.
+
+**Rate limit:** The `/auth/send` endpoint accepts at most 5 requests per email
+address per hour. The 6th request returns HTTP 429.
+
+**Self-serve:** There is no longer a manual CLI provisioning step for new users.
+The `bun run src/cli/issue-token.ts <email>` CLI is retained for internal use
+and emergency provisioning only.
+
 ## Stripe integration
 
 ### Products and prices

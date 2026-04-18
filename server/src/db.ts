@@ -133,6 +133,17 @@ function runMigrations(db: Database): void {
       price_id   TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
     );
+
+    -- Phase 4: Magic-link auth
+    CREATE TABLE IF NOT EXISTS magic_tokens (
+      token      TEXT PRIMARY KEY,
+      email      TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+      expires_at TEXT NOT NULL,
+      used_at    TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_magic_tokens_email ON magic_tokens(email);
   `);
 }
 
@@ -517,4 +528,71 @@ export function getUserByStripeCustomerId(customerId: string): User | null {
   const sub = getSubscriptionByStripeCustomerId(customerId);
   if (!sub) return null;
   return getUserById(sub.user_id);
+}
+
+// ---------------------------------------------------------------------------
+// Magic-link auth helpers (Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface MagicToken {
+  token: string;
+  email: string;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+}
+
+export function createMagicToken(email: string, token: string, expiresAt: string): void {
+  getDb().run(
+    `INSERT INTO magic_tokens (token, email, expires_at) VALUES (?, ?, ?)`,
+    [token, email, expiresAt],
+  );
+}
+
+export function getMagicToken(token: string): MagicToken | null {
+  return getDb()
+    .query<MagicToken, [string]>(`SELECT * FROM magic_tokens WHERE token = ?`)
+    .get(token);
+}
+
+export function markMagicTokenUsed(token: string): void {
+  getDb().run(
+    `UPDATE magic_tokens SET used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE token = ?`,
+    [token],
+  );
+}
+
+/** Count magic tokens created for an email within the last windowMs milliseconds. */
+export function countRecentMagicTokens(email: string, windowMs: number): number {
+  const since = new Date(Date.now() - windowMs).toISOString();
+  const row = getDb()
+    .query<{ n: number }, [string, string]>(
+      `SELECT COUNT(*) AS n FROM magic_tokens WHERE email = ? AND created_at >= ?`,
+    )
+    .get(email, since);
+  return row?.n ?? 0;
+}
+
+/** Create a user if one does not exist for this email. Returns the user either way. */
+export function getOrCreateUserByEmail(email: string): User {
+  const db = getDb();
+  const existing = db.query<User, [string]>(
+    `SELECT id, email, api_token, created_at, tier FROM users WHERE email = ?`,
+  ).get(email);
+  if (existing) return existing;
+  // Placeholder api_token — will be replaced when they verify the magic link.
+  const placeholder = crypto.randomUUID();
+  return createUser(email, placeholder);
+}
+
+/** Issue a fresh API token for a user (inserts into api_tokens, returns the token string). */
+export function issueApiToken(userId: string): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  getDb().run(
+    `INSERT INTO api_tokens (token, user_id) VALUES (?, ?)`,
+    [token, userId],
+  );
+  return token;
 }
