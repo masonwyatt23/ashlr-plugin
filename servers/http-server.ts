@@ -15,6 +15,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { recordSaving as recordSavingCore } from "./_stats";
+import { confidenceBadge, confidenceTier } from "./_summarize";
+import { logEvent } from "./_events";
 export { isPrivateHost, compressHtml, compressJson } from "./_http-helpers";
 import { isPrivateHost, compressHtml, compressJson } from "./_http-helpers";
 
@@ -91,7 +93,15 @@ async function doFetch(args: HttpArgs): Promise<string> {
   await recordSaving(raw.length, compact.length, "ashlr__http");
 
   const header = `${method} ${url} · ${res.status} · ${ct || "?"} · ${(raw.length / 1024).toFixed(1)} KB → ${(compact.length / 1024).toFixed(1)} KB`;
-  return header + "\n\n" + compact;
+  const httpBadgeOpts = {
+    toolName: "ashlr__http",
+    rawBytes: raw.length,
+    outputBytes: compact.length,
+  };
+  if (confidenceTier(httpBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__http", reason: "low-confidence" });
+  }
+  return header + "\n\n" + compact + confidenceBadge(httpBadgeOpts);
 }
 
 // ---------- MCP wiring ----------

@@ -20,8 +20,9 @@ import {
 import { existsSync, readFileSync, statSync } from "fs";
 import { glob } from "fs/promises";
 import { join } from "path";
-import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { summarizeIfLarge, PROMPTS, confidenceBadge, confidenceTier } from "./_summarize";
 import { recordSaving as recordSavingCore } from "./_stats";
+import { logEvent } from "./_events";
 
 async function recordSaving(
   rawBytes: number,
@@ -282,8 +283,18 @@ async function ashlrLogs(args: LogsArgs): Promise<string> {
   const footer = `\n\n[ashlr__logs \u00b7 ${existing.length} file${existing.length === 1 ? "" : "s"}]`;
   const text = body + footer;
 
-  await recordSaving(Math.max(totalRawBytes, body.length), text.length, "ashlr__logs");
-  return text;
+  const logsRawBytes = Math.max(totalRawBytes, body.length);
+  await recordSaving(logsRawBytes, text.length, "ashlr__logs");
+
+  const logsBadgeOpts = {
+    toolName: "ashlr__logs",
+    rawBytes: logsRawBytes,
+    outputBytes: text.length,
+  };
+  if (confidenceTier(logsBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__logs", reason: "low-confidence" });
+  }
+  return text + confidenceBadge(logsBadgeOpts);
 }
 
 // ---------------------------------------------------------------------------

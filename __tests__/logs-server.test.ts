@@ -108,6 +108,7 @@ describe("ashlr-logs · behavior", () => {
     for (const bl of body.split("\n")) {
       if (!bl.trim()) continue;
       if (bl.startsWith("[ashlr__logs")) continue;
+      if (bl.startsWith("[ashlr confidence:")) continue;
       expect(bl).toContain("[ERROR]");
     }
   });

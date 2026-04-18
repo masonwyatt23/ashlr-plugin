@@ -1,7 +1,7 @@
 {
   "name": "ashlr",
-  "version": "0.8.0",
-  "description": "Open-source Claude Code plugin — 13 MCP tools (Read/Grep/Edit/SQL/Bash/Tree/HTTP/Diff/Logs/Orient/PR+Issue/Glob/WebFetch), per-session token accounting, animated status line, LLM summarization, genome scribe loop. MIT, zero telemetry.",
+  "version": "0.9.0",
+  "description": "Open-source Claude Code plugin — 14 MCP tools (Read/Grep/Edit/MultiEdit/Ask/SQL/Bash/Tree/HTTP/Diff/Logs/Orient/PR+Issue/Glob/WebFetch), per-session token accounting, animated status line, genome auto-refresh, confidence badges, context-pressure widget, shareable SVG savings badge. MIT, zero telemetry.",
   "author": {
     "name": "Mason Wyatt",
     "url": "https://github.com/ashlrai"
@@ -26,6 +26,8 @@
     "ashlr-orient":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/orient-server.ts"] },
     "ashlr-github":     { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/github-server.ts"] },
     "ashlr-glob":       { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/glob-server.ts"] },
-    "ashlr-webfetch":   { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/webfetch-server.ts"] }
+    "ashlr-webfetch":   { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/webfetch-server.ts"] },
+    "ashlr-multi-edit": { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/multi-edit-server.ts"] },
+    "ashlr-ask":        { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/ask-server.ts"] }
   }
 }

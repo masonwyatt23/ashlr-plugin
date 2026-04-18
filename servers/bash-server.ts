@@ -24,7 +24,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { randomBytes } from "crypto";
-import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { summarizeIfLarge, PROMPTS, confidenceBadge, confidenceTier } from "./_summarize";
 import { recordSaving as recordSavingCore } from "./_stats";
 import { logEvent } from "./_events";
 
@@ -420,7 +420,24 @@ async function ashlrBash(args: BashArgs): Promise<string> {
 
   const trailer = `· ${exitLabel} · ${res.durationMs}ms${savedNote}`;
   // Compose: command echo, body, optional stderr, trailer.
-  return `$ ${command}\n${body}${body.endsWith("\n") || body.length === 0 ? "" : "\n"}${stderrBlock}${stderrBlock.endsWith("\n") ? "" : "\n"}${trailer}`;
+  const composed = `$ ${command}\n${body}${body.endsWith("\n") || body.length === 0 ? "" : "\n"}${stderrBlock}${stderrBlock.endsWith("\n") ? "" : "\n"}${trailer}`;
+
+  // Append confidence badge only when compression actually fired.
+  if (compact && rawStdoutBytes > compactBytes) {
+    const exitedNonZero = res.exitCode != null && res.exitCode !== 0;
+    const bashBadgeOpts = {
+      toolName: "ashlr__bash",
+      rawBytes: rawStdoutBytes,
+      outputBytes: compactBytes,
+      fellBack: !structuredSummaryFired && rawStdoutBytes > 16_384 && compactBytes < rawStdoutBytes,
+      nonZeroExit: exitedNonZero && rawStdoutBytes > compactBytes,
+    };
+    if (confidenceTier(bashBadgeOpts) === "low") {
+      await logEvent("tool_noop", { tool: "ashlr__bash", reason: "low-confidence" });
+    }
+    return composed + confidenceBadge(bashBadgeOpts);
+  }
+  return composed;
 }
 
 // ---------------------------------------------------------------------------

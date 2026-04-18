@@ -171,7 +171,7 @@ function formatOutput(matches: string[], pattern: string, limit: number): string
 // Core logic
 // ---------------------------------------------------------------------------
 
-async function ashlrGlob(input: GlobOptions): Promise<string> {
+export async function ashlrGlob(input: GlobOptions): Promise<string> {
   const cwd = resolve(input.cwd ?? process.cwd());
   const limit = typeof input.limit === "number" ? input.limit : DEFAULT_LIMIT;
   const { pattern } = input;
@@ -252,5 +252,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (import.meta.main) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

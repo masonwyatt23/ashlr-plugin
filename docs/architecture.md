@@ -163,6 +163,21 @@ stats.json
 
 **Width budget.** The output target is 80 characters. `visibleWidth()` in `scripts/ui-animation.ts:visibleWidth` strips ANSI escapes and counts code points to measure rendered width, independent of color sequences. The status line truncates segments to stay within budget.
 
+**Context-pressure widget.** A micro-widget `ctx: NN%` is inserted between the sparkline and the `session +N` segment when Claude Code pipes a session-state JSON payload on stdin. The widget is hidden entirely when the payload is absent or contains no usable fields — it never guesses. Color tiers (truecolor only):
+
+| Range  | Color               |
+|--------|---------------------|
+| 0–60%  | dim brand-green     |
+| 60–80% | yellow (`#d4a72c`)  |
+| 80–95% | orange (`#d9793a`)  |
+| 95%+   | red + bold (`#e15b5b`) |
+
+Payload fields tried (in priority order):
+1. `context_used_tokens` + `context_limit_tokens` (explicit used/limit pair — most precise)
+2. All other fields (`input_tokens`, `context_tokens`, `total_tokens`, `total_tokens_used`, `sessionTokens`) require a paired limit field to compute a percentage; without one the widget is hidden.
+
+The stdin reader in `import.meta.main` has a hard 50ms deadline and never blocks the terminal. The widget counts toward the 80-char visible-width budget. Drop-order under tight budget: tip is dropped first, then the context widget; the brand + session + lifetime core is never truncated mid-word.
+
 **Settings toggles** (under `ashlr` key in `~/.claude/settings.json`):
 - `statusLine` — master on/off switch (default: true)
 - `statusLineSession` — show "session +N" segment

@@ -26,6 +26,85 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 
 // ---------------------------------------------------------------------------
+// Confidence badge — pure helper, no I/O
+// ---------------------------------------------------------------------------
+
+export interface ConfidenceBadgeOpts {
+  /** Tool name for the escalation hint (e.g. "ashlr__read"). */
+  toolName: string;
+  /** Raw bytes before compression. */
+  rawBytes: number;
+  /** Output bytes after compression. */
+  outputBytes: number;
+  /** True if the LLM fell back to truncation. Always → low tier. */
+  fellBack?: boolean;
+  /** True if the command exited non-zero AND bytes were elided. Always → low. */
+  nonZeroExit?: boolean;
+  /** Optional extra tag appended before the closing bracket (e.g. "mtime=123"). */
+  extra?: string;
+}
+
+type ConfidenceTier = "high" | "medium" | "low";
+
+function _tier(opts: ConfidenceBadgeOpts): ConfidenceTier {
+  if (opts.fellBack || opts.nonZeroExit) return "low";
+  if (opts.rawBytes <= 0 || opts.outputBytes <= 0) return "high";
+  const ratio = opts.outputBytes / opts.rawBytes;
+  if (ratio >= 1 / 3) return "high";
+  if (ratio >= 1 / 8) return "medium";
+  return "low";
+}
+
+/** Exposed so call sites can branch on tier (e.g. to emit a logEvent). */
+export function confidenceTier(opts: ConfidenceBadgeOpts): ConfidenceTier {
+  return _tier(opts);
+}
+
+/**
+ * Return a one-line confidence footer to append to compressed tool output.
+ * Returns an empty string when no compression occurred (rawBytes ≤ outputBytes)
+ * so call sites can always do `text + confidenceBadge(...)` safely.
+ *
+ * The returned string (when non-empty) is ≤ 80 chars and starts with "\n".
+ */
+export function confidenceBadge(opts: ConfidenceBadgeOpts): string {
+  // No compression and no failure signal → no badge. Also skip when the
+  // raw payload is tiny — a badge on a sub-512-byte response is more noise
+  // than signal. fellBack/nonZeroExit still emit (they're load-bearing
+  // quality signals regardless of payload size).
+  if (!opts.fellBack && !opts.nonZeroExit) {
+    if (opts.rawBytes <= opts.outputBytes) return "";
+    if (opts.rawBytes < 512) return "";
+  }
+
+  const tier = _tier(opts);
+  const rawKB = (opts.rawBytes / 1024).toFixed(0) + "KB";
+  const outKB = (opts.outputBytes / 1024).toFixed(0) + "KB";
+  const extraPart = opts.extra ? ` · ${opts.extra}` : "";
+
+  // 80-char budget. Required pieces (always included): tier name + the
+  // actionable `bypassSummary:true` hint. Optional pieces dropped under
+  // pressure in order: (1) byte numbers, (2) the hint wording shortens.
+  // `extra` (when caller passes one) is treated as required — it's how
+  // callers thread debug context (e.g. mtime) into the badge.
+  const BUDGET = 80;
+  const hint = tier === "low"
+    ? "bypassSummary:true to recover fidelity"
+    : "bypassSummary:true recovers fidelity";
+
+  const withBytes = `[ashlr confidence: ${tier} · ${rawKB}→${outKB}${extraPart} · ${hint}]`;
+  const withoutBytes = `[ashlr confidence: ${tier}${extraPart} · ${hint}]`;
+  const minimal = `[ashlr confidence: ${tier} · ${hint}]`;
+
+  let line = withBytes;
+  if (line.length > BUDGET) line = withoutBytes;
+  if (line.length > BUDGET) line = minimal;
+  if (line.length > BUDGET) line = line.slice(0, BUDGET - 1) + "]";
+
+  return "\n" + line;
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 

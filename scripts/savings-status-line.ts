@@ -28,8 +28,10 @@ import { homedir } from "os";
 import { join } from "path";
 import { c } from "./ui.ts";
 import {
+  activityIndicator,
   detectCapability,
   frameAt,
+  renderContextPressure,
   renderHeartbeat,
   renderSparkline as renderAnimatedSparkline,
   visibleWidth,
@@ -171,19 +173,25 @@ function readJson<T>(path: string): T | null {
 }
 
 // ---------------------------------------------------------------------------
-// 2-second read cache (mtime-aware)
+// Read cache (mtime-aware, 300ms TTL)
 // ---------------------------------------------------------------------------
 // Claude Code invokes the status line frequently (on every prompt tick).
 // Re-reading + re-parsing stats.json on every call is wasteful — the status
-// bar does not need sub-second freshness. We cache JSON reads for 2s keyed by
-// absolute path, but a cache entry is invalidated whenever the file's mtime
-// changes (or its existence flips). That keeps the cache effective under
-// steady load while staying correct across tests and mid-session writes.
+// bar does not need sub-millisecond freshness. We cache JSON reads for 300ms
+// keyed by absolute path, but a cache entry is invalidated immediately whenever
+// the file's mtime changes (or its existence flips). That makes the cache
+// effective under steady load (caps at ~3 reads/second) while staying correct
+// across terminals: as soon as terminal A's debounce flush lands on disk (≤250ms),
+// terminal B's next status-line poll sees the new mtime and re-reads.
+//
+// Net worst-case latency after recordSaving: 250ms debounce + 300ms TTL = 550ms.
+// Typical case when mtime changes mid-window: 250ms debounce + 0ms (mtime
+// invalidation fires immediately) = ~250ms.
 //
 // Cache is process-local — each fresh invocation of this script as a Claude
 // Code subprocess starts empty; the cache only helps long-running hosts and
 // within-test batch calls.
-const READ_CACHE_TTL_MS = 2000;
+const READ_CACHE_TTL_MS = 300;
 interface CacheEntry {
   at: number;
   mtimeMs: number;
@@ -223,6 +231,49 @@ function pickTip(tips: readonly string[], seed?: number): string {
   return tips[idx]!;
 }
 
+/**
+ * Subset of the JSON payload Claude Code may send on stdin to the status-line
+ * command. We try multiple field names defensively; if none resolve to a
+ * positive number the context-pressure widget is hidden entirely.
+ *
+ * Known / candidate fields (any may be present depending on CC version):
+ *   input_tokens          — tokens consumed in the current context window
+ *   context_tokens        — alias used in some builds
+ *   total_tokens          — alias used in some builds
+ *   total_tokens_used     — alias
+ *   sessionTokens         — alias
+ *   context_used_tokens   — tokens used (paired with context_limit_tokens)
+ *   context_limit_tokens  — total window size
+ */
+export interface StatusLineInput {
+  input_tokens?:        number;
+  context_tokens?:      number;
+  total_tokens?:        number;
+  total_tokens_used?:   number;
+  sessionTokens?:       number;
+  context_used_tokens?: number;
+  context_limit_tokens?: number;
+  [key: string]: unknown;
+}
+
+/** Extract a 0–100 context-pressure percentage from a CC stdin payload.
+ *  Returns null when no usable field is found. */
+export function extractContextPct(input: StatusLineInput | null | undefined): number | null {
+  if (!input) return null;
+  // Prefer the explicit used+limit pair — most precise.
+  if (
+    typeof input.context_used_tokens === "number" &&
+    typeof input.context_limit_tokens === "number" &&
+    input.context_limit_tokens > 0
+  ) {
+    return Math.min(100, (input.context_used_tokens / input.context_limit_tokens) * 100);
+  }
+  // Fall through to token-count fields — these need a known window size.
+  // Claude claude-sonnet-4-6 / opus context windows are large; without a limit
+  // field we cannot compute a meaningful %. Hide the widget.
+  return null;
+}
+
 export interface BuildOptions {
   home?: string;
   /** Deterministic tip index, used by tests. */
@@ -233,6 +284,12 @@ export interface BuildOptions {
   env?: NodeJS.ProcessEnv;
   /** Clock injection — tests pin this; production uses Date.now. */
   now?: number;
+  /**
+   * Parsed JSON payload from Claude Code's stdin. When present, we extract a
+   * context-pressure percentage and render the ctx widget. When absent/null
+   * the widget is hidden entirely (never lies).
+   */
+  statusLineInput?: StatusLineInput | null;
 }
 
 export function buildStatusLine(opts: BuildOptions = {}): string {
@@ -277,16 +334,33 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
       // so the 7-day shape stays stable across the new per-session stats.
       const keys = lastNDayKeys(7);
       const values = keys.map((k) => stats?.lifetime?.byDay?.[k]?.tokensSaved ?? 0);
-      brandParts.push(renderAnimatedSparkline({ values, frame, msSinceActive, cap }));
+      const spark = renderAnimatedSparkline({ values, frame, msSinceActive, cap });
+      // Wide terminals (>100 cols) get a "7d " label before the sparkline so
+      // users know at a glance what the cells represent. Under 100 cols the
+      // prefix is dropped to keep things compact. Width-stable in both modes.
+      const sparkPrefix = budget > 100 ? "7d " : "";
+      brandParts.push(sparkPrefix + spark);
     }
     const brand = brandParts.join(" ");
 
     const parts: string[] = [brand];
-    if (showSession) parts.push(`session +${formatTokens(session)}`);
+
+    // Context-pressure widget — inserted between sparkline and "session +N".
+    // Hidden entirely when no usable payload field is present.
+    const ctxPct = extractContextPct(opts.statusLineInput);
+    const ctxWidget = ctxPct !== null ? renderContextPressure(ctxPct, cap) : null;
+    if (ctxWidget !== null) parts.push(ctxWidget);
+
+    const actIndicator = activityIndicator(msSinceActive, cap);
+    if (showSession) parts.push(`session ${actIndicator}+${formatTokens(session)}`);
     if (showLifetime) parts.push(`lifetime +${formatTokens(lifetime)}`);
 
     let line = parts.join(" · ");
 
+    // Drop-order under tight budget:
+    //   1. Try to add the tip — drop tip first if it doesn't fit.
+    //   2. If still over budget, drop the ctx widget.
+    //   3. Hard-truncate as last resort.
     if (showTips) {
       const tip = pickTip(TIPS, opts.tipSeed);
       const candidate = `${line} · tip: ${tip}`;
@@ -294,6 +368,15 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
         line = candidate;
       }
       // Otherwise drop the tip entirely (no partial/truncated rendering).
+    }
+
+    // If ctx widget caused overflow (narrow terminal), rebuild without it.
+    if (ctxWidget !== null && visibleWidth(line) > budget) {
+      const partsNoCtx: string[] = [brand];
+      if (showSession) partsNoCtx.push(`session ${actIndicator}+${formatTokens(session)}`);
+      if (showLifetime) partsNoCtx.push(`lifetime +${formatTokens(lifetime)}`);
+      line = partsNoCtx.join(" · ");
+      // Tip was already dropped above (we only reach here when over budget).
     }
 
     // Budget enforcement operates on VISIBLE width — ANSI escapes don't count.
@@ -328,8 +411,39 @@ function colorize(line: string): string {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Stdin reader — non-blocking, 50ms deadline
+// ---------------------------------------------------------------------------
+// Claude Code may pipe a JSON payload describing the current session state.
+// We read it with a hard 50ms deadline so we never stall the terminal on a
+// slow or empty stdin. Returns null on timeout, parse error, or empty input.
+
+async function readStdinPayload(): Promise<StatusLineInput | null> {
+  return new Promise<StatusLineInput | null>((resolve) => {
+    // Resolve null if stdin is a TTY (nothing to read) or non-readable.
+    if (process.stdin.isTTY) { resolve(null); return; }
+
+    let raw = "";
+    const timer = setTimeout(() => {
+      process.stdin.destroy();
+      resolve(null);
+    }, 50);
+
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk: string) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      clearTimeout(timer);
+      if (!raw.trim()) { resolve(null); return; }
+      try { resolve(JSON.parse(raw) as StatusLineInput); }
+      catch { resolve(null); }
+    });
+    process.stdin.on("error", () => { clearTimeout(timer); resolve(null); });
+  });
+}
+
 // Run as script (skip when imported by tests).
 if (import.meta.main) {
-  process.stdout.write(buildStatusLine() + "\n");
+  const statusLineInput = await readStdinPayload();
+  process.stdout.write(buildStatusLine({ statusLineInput }) + "\n");
   process.exit(0);
 }

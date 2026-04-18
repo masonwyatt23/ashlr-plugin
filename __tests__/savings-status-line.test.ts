@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { buildStatusLine, formatTokens, renderSparkline } from "../scripts/savings-status-line";
+import { buildStatusLine, extractContextPct, formatTokens, renderSparkline } from "../scripts/savings-status-line";
 
 let home: string;
 
@@ -90,6 +90,30 @@ describe("formatTokens", () => {
 
   test("millions → M with one decimal", () => {
     expect(formatTokens(1_234_567)).toBe("1.2M");
+  });
+});
+
+describe("extractContextPct", () => {
+  test("returns null for null/undefined input", () => {
+    expect(extractContextPct(null)).toBeNull();
+    expect(extractContextPct(undefined)).toBeNull();
+  });
+
+  test("returns null when no usable fields", () => {
+    expect(extractContextPct({})).toBeNull();
+    expect(extractContextPct({ input_tokens: 5000 })).toBeNull();
+  });
+
+  test("context_used_tokens + context_limit_tokens → correct pct", () => {
+    expect(extractContextPct({ context_used_tokens: 50_000, context_limit_tokens: 100_000 })).toBe(50);
+  });
+
+  test("caps at 100 when used > limit", () => {
+    expect(extractContextPct({ context_used_tokens: 120_000, context_limit_tokens: 100_000 })).toBe(100);
+  });
+
+  test("returns null when context_limit_tokens is 0", () => {
+    expect(extractContextPct({ context_used_tokens: 1000, context_limit_tokens: 0 })).toBeNull();
   });
 });
 
@@ -244,6 +268,135 @@ describe("buildStatusLine", () => {
     const line = buildStatusLine({ home, tipSeed: 0, env: { NO_COLOR: "1", ASHLR_STATUS_ANIMATE: "0", CLAUDE_SESSION_ID: SID } });
     expect(line.length).toBeLessThanOrEqual(80);
   });
+
+  // -------------------------------------------------------------------------
+  // Context-pressure widget
+  // -------------------------------------------------------------------------
+
+  test("ctx widget renders when statusLineInput carries context_used/limit tokens", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const line = buildStatusLine({
+      home,
+      tipSeed: 0,
+      env: envWith({ COLUMNS: "120" }),
+      statusLineInput: { context_used_tokens: 50_000, context_limit_tokens: 100_000 },
+    });
+    expect(line).toContain("ctx: 50%");
+  });
+
+  test("ctx widget hidden when no statusLineInput", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
+    expect(line).not.toContain("ctx:");
+  });
+
+  test("ctx widget hidden when statusLineInput is null", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith(), statusLineInput: null });
+    expect(line).not.toContain("ctx:");
+  });
+
+  test("ctx widget hidden when statusLineInput has no usable fields", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const line = buildStatusLine({
+      home, tipSeed: 0, env: envWith(),
+      statusLineInput: { input_tokens: 5000 }, // no limit field → cannot compute pct
+    });
+    expect(line).not.toContain("ctx:");
+  });
+
+  test("ctx widget appears between sparkline+brand and session segment", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const line = buildStatusLine({
+      home,
+      tipSeed: 0,
+      env: envWith({ COLUMNS: "120" }),
+      statusLineInput: { context_used_tokens: 75_000, context_limit_tokens: 100_000 },
+    });
+    // Positions: brand…sparkline < ctx: < session +N
+    const ctxPos     = line.indexOf("ctx:");
+    const sessionPos = line.indexOf("session");
+    expect(ctxPos).toBeGreaterThan(0);
+    expect(ctxPos).toBeLessThan(sessionPos);
+  });
+
+  test("ctx widget counts toward budget (visibleWidth)", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const withCtx = buildStatusLine({
+      home, tipSeed: 0, env: envWith({ COLUMNS: "120" }),
+      statusLineInput: { context_used_tokens: 50_000, context_limit_tokens: 100_000 },
+    });
+    const withoutCtx = buildStatusLine({
+      home, tipSeed: 0, env: envWith({ COLUMNS: "120" }),
+    });
+    // Strip ANSI to get visible widths.
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const wWith    = Array.from(stripAnsi(withCtx)).length;
+    const wWithout = Array.from(stripAnsi(withoutCtx)).length;
+    // With ctx widget present, line is wider (widget is ~9 chars + separator).
+    expect(wWith).toBeGreaterThan(wWithout);
+  });
+
+  test("drop-order: tip dropped before ctx widget under tight budget", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    // Use a constrained budget that forces something to drop.
+    // At 60 cols the tip (longest ~45 chars) should drop first; ctx (9 chars) survives.
+    const line = buildStatusLine({
+      home,
+      tipSeed: 0,
+      env: envWith({ COLUMNS: "60" }),
+      statusLineInput: { context_used_tokens: 50_000, context_limit_tokens: 100_000 },
+    });
+    // Tip should be absent; ctx widget should still be present.
+    expect(line).not.toContain("tip:");
+    expect(line).toContain("ctx:");
+  });
+
+  test("drop-order: ctx widget dropped when even core line exceeds budget", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    // Extremely narrow terminal — even brand + session + ctx won't fit.
+    const line = buildStatusLine({
+      home,
+      tipSeed: 0,
+      env: envWith({ COLUMNS: "30" }),
+      statusLineInput: { context_used_tokens: 90_000, context_limit_tokens: 100_000 },
+    });
+    // Strip ANSI.
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(Array.from(stripped).length).toBeLessThanOrEqual(30);
+    // ctx widget should have been dropped.
+    expect(line).not.toContain("ctx:");
+  });
+
+  test("output stays within budget when ctx widget is present", async () => {
+    await writeStats({ sessionTokensSaved: 999_999_999, lifetimeTokensSaved: 999_999_999 });
+    for (let i = 0; i < 7; i++) {
+      const line = buildStatusLine({
+        home, tipSeed: i, env: envWith(),
+        statusLineInput: { context_used_tokens: 80_000, context_limit_tokens: 100_000 },
+      });
+      const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(Array.from(stripped).length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test("ctx width stable across 60 frames", async () => {
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 2000 });
+    const widths = new Set<number>();
+    for (let f = 0; f < 60; f++) {
+      const line = buildStatusLine({
+        home, tipSeed: 0,
+        env: envWith({ COLUMNS: "120" }),
+        now: Date.now() + f * 120,
+        statusLineInput: { context_used_tokens: 72_000, context_limit_tokens: 100_000 },
+      });
+      const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+      widths.add(Array.from(stripped).length);
+    }
+    expect(widths.size).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
 
   test("activity pulse: recent lastSavingAt makes line include no ANSI when animation off (no regressions)", async () => {
     const today = new Date().toISOString().slice(0, 10);

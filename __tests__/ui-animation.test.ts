@@ -15,8 +15,10 @@ import {
   frameAt,
   gradientTs,
   lerpColor,
+  renderContextPressure,
   renderHeartbeat,
   renderSparkline,
+  sweepFactor,
   valuesToRamp,
   visibleWidth,
 } from "../scripts/ui-animation";
@@ -184,5 +186,142 @@ describe("ASCII fallback", () => {
     for (const ch of out) {
       expect(ASCII_RAMP.includes(ch)).toBe(true);
     }
+  });
+});
+
+describe("renderContextPressure", () => {
+  const truecolorCap = detectCapability({ COLORTERM: "truecolor", LANG: "en_US.UTF-8" });
+  const plainCap     = detectCapability({ NO_COLOR: "1" });
+
+  test("visible width is stable across all tiers", () => {
+    for (const pct of [10, 50, 72, 85, 97]) {
+      const out = renderContextPressure(pct, truecolorCap);
+      // "ctx: NN%" → 8 chars; "ctx: 100%" → 9 chars. Stable per pct.
+      expect(visibleWidth(out)).toBe(`ctx: ${Math.round(pct)}%`.length);
+    }
+  });
+
+  test("NO_COLOR → plain text, no ANSI", () => {
+    const out = renderContextPressure(50, plainCap);
+    expect(out).toBe("ctx: 50%");
+    expect(out).not.toMatch(/\x1b\[/);
+  });
+
+  // Tier: 0–60% → dim brand-green (#00d09c range, dark variant)
+  test("50% → truecolor green escape", () => {
+    const out = renderContextPressure(50, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;/);
+    // Green channel dominant; red low
+    expect(out).toMatch(/\x1b\[38;2;0;160;120m/);
+    expect(out).not.toMatch(/\x1b\[1m/); // no bold
+  });
+
+  // Tier: 60–80% → yellow (#d4a72c)
+  test("75% → truecolor yellow escape", () => {
+    const out = renderContextPressure(75, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;212;167;44m/);
+    expect(out).not.toMatch(/\x1b\[1m/); // no bold
+  });
+
+  // Tier: 80–95% → orange (#d9793a)
+  test("90% → truecolor orange escape", () => {
+    const out = renderContextPressure(90, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;217;121;58m/);
+    expect(out).not.toMatch(/\x1b\[1m/); // no bold
+  });
+
+  // Tier: 95%+ → red + bold (#e15b5b)
+  test("97% → truecolor red + bold escape", () => {
+    const out = renderContextPressure(97, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;225;91;91m/);
+    expect(out).toMatch(/\x1b\[1m/); // bold on
+  });
+
+  test("boundary at exactly 60% uses green tier", () => {
+    const out = renderContextPressure(60, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;212;167;44m/); // yellow (60 is start of yellow tier)
+  });
+
+  test("boundary at exactly 80% uses orange tier", () => {
+    const out = renderContextPressure(80, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;217;121;58m/);
+  });
+
+  test("boundary at exactly 95% uses red tier with bold", () => {
+    const out = renderContextPressure(95, truecolorCap);
+    expect(out).toMatch(/\x1b\[38;2;225;91;91m/);
+    expect(out).toMatch(/\x1b\[1m/);
+  });
+
+  test("width stable across 60 consecutive frames (same pct)", () => {
+    const widths = new Set<number>();
+    for (let f = 0; f < 60; f++) {
+      widths.add(visibleWidth(renderContextPressure(72, truecolorCap)));
+    }
+    expect(widths.size).toBe(1);
+  });
+});
+
+describe("sweepFactor — 3-cell trail effect", () => {
+  test("lead cell (delta 0) returns 1.0", () => {
+    expect(sweepFactor(3, 3, 7)).toBe(1.0);
+  });
+
+  test("trail cell (one behind, delta w-1) returns 0.45", () => {
+    // head=3, width=7: trail is cell 2 (delta = (2-3+7)%7 = 6 = w-1)
+    expect(sweepFactor(2, 3, 7)).toBe(0.45);
+  });
+
+  test("dim-echo cell (two behind, delta w-2) returns 0.15", () => {
+    // head=3, width=7: echo is cell 1 (delta = (1-3+7)%7 = 5 = w-2)
+    expect(sweepFactor(1, 3, 7)).toBe(0.15);
+  });
+
+  test("unrelated cell returns 0", () => {
+    expect(sweepFactor(5, 3, 7)).toBe(0);
+    expect(sweepFactor(0, 3, 7)).toBe(0);
+  });
+
+  test("wraps correctly at left edge (head=0)", () => {
+    // trail should be cell w-1=6, echo should be cell w-2=5
+    expect(sweepFactor(6, 0, 7)).toBe(0.45);
+    expect(sweepFactor(5, 0, 7)).toBe(0.15);
+    expect(sweepFactor(0, 0, 7)).toBe(1.0);
+  });
+});
+
+describe("renderSparkline sweep-with-trail — frame stability + visible motion", () => {
+  const cap = detectCapability({ COLORTERM: "truecolor", LANG: "en_US.UTF-8" });
+  const values = [0, 1, 2, 3, 4, 5, 6];
+
+  test("width stays stable across 60 frames with active pulse", () => {
+    const widths = new Set<number>();
+    for (let f = 0; f < 60; f++) {
+      const out = renderSparkline({ values, frame: f, msSinceActive: 500, cap });
+      widths.add(visibleWidth(out));
+    }
+    expect(widths.size).toBe(1);
+  });
+
+  test("sweep produces distinct color values across adjacent cells (visible motion)", () => {
+    // With a 7-cell sparkline and active pulse, the head and trail cells must
+    // have different ANSI color codes — i.e. the sweep is visible.
+    // We check that at least two distinct rgb triples appear in the output
+    // (head = white-blended, adjacent = less-blended).
+    const out = renderSparkline({ values, frame: 10, msSinceActive: 500, cap });
+    // Collect all rgb triples from the output.
+    const triples = [...out.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g)]
+      .map((m) => `${m[1]},${m[2]},${m[3]}`);
+    const unique = new Set(triples);
+    expect(unique.size).toBeGreaterThan(1);
+  });
+
+  test("idle pulse → same output as before (intensity 0, no bright cells)", () => {
+    const active = renderSparkline({ values, frame: 10, msSinceActive: 500, cap });
+    const idle   = renderSparkline({ values, frame: 10, msSinceActive: 10_000, cap });
+    // The idle version should not contain 255,255,255 (white pulse blending).
+    expect(idle).not.toMatch(/\x1b\[38;2;255;255;255m/);
+    // Active version must differ from idle (sweep is visible).
+    expect(active).not.toBe(idle);
   });
 });

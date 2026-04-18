@@ -399,7 +399,7 @@ function baselineBytes(n: Node): number {
   return bytes;
 }
 
-async function ashlrTree(input: TreeOptions): Promise<string> {
+export async function ashlrTree(input: TreeOptions): Promise<string> {
   const rootAbs = resolve(input.path ?? process.cwd());
   if (!existsSync(rootAbs)) {
     throw new Error(`path does not exist: ${rootAbs}`);
@@ -536,8 +536,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (import.meta.main) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
 
 // unused relative import guard
 void relative;

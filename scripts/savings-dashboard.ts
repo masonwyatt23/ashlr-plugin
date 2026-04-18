@@ -2,23 +2,27 @@
 /**
  * ashlr savings dashboard — rich CLI view.
  *
- * Reads ~/.ashlr/stats.json and renders a detailed multi-panel report:
- *   - Header: lifetime + session totals, cost in USD, session age
- *   - Session box: calls, tokens, capture ratio
- *   - By-tool bar chart (session + lifetime)
- *   - 7-day ASCII sparkline
- *   - 30-day ASCII sparkline + rollup
- *   - Top projects (if per-project data is present)
- *   - Projected annual savings (extrapolated from recent activity)
+ * Reads ~/.ashlr/stats.json and renders a multi-panel dashboard:
+ *   - ASCII-art banner (3 lines, block chars, ≤70 cols)
+ *   - "At a glance" tile strip (session / lifetime / best day)
+ *   - Per-tool horizontal bar chart (top 8 tools, Unicode block bars)
+ *   - 7-day + 30-day sparklines (labeled, capped at 20 cells)
+ *   - Projected annual savings (extrapolated from last 30d)
+ *   - Top 3 projects (from ~/.ashlr/session-log.jsonl)
  *
- * Uses ANSI colors + Unicode box-drawing. No external deps.
- * Contract: always exit 0, render a graceful "no data yet" panel when
- * stats.json is absent or malformed.
+ * Uses ANSI truecolor only when COLORTERM=truecolor/24bit and NO_COLOR is
+ * unset. Falls back to plain text with identical visible column widths.
+ *
+ * --watch flag: clear + redraw every 1.5s. Exits on Ctrl-C.
+ * Skipped (single render) when process.stdin.isTTY === false.
+ *
+ * Contract: always exit 0. No external dependencies.
  */
 
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, basename } from "path";
+import { buildTopProjects } from "./savings-report-extras.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,12 +42,8 @@ interface PerDay {
 interface ByDay {
   [date: string]: PerDay | undefined;
 }
-interface PerProject {
-  calls?: number;
-  tokensSaved?: number;
-}
 interface ByProject {
-  [path: string]: PerProject | undefined;
+  [path: string]: { calls?: number; tokensSaved?: number } | undefined;
 }
 
 interface SessionStats {
@@ -66,63 +66,83 @@ interface Stats {
 }
 
 // ---------------------------------------------------------------------------
-// ANSI styling — a tiny zero-dep helper. Disables when NO_COLOR is set or
-// stdout is not a TTY.
+// Color / ANSI — truecolor when COLORTERM advertises it; plain fallback
 // ---------------------------------------------------------------------------
 
-const COLOR_ENABLED = (() => {
+const TRUECOLOR = (() => {
   if (process.env.NO_COLOR) return false;
-  if (process.env.FORCE_COLOR) return true;
-  // Bun's process.stdout.isTTY is reliable; default to true when unknown so
-  // that the dashboard still looks good when piped into Claude Code's code
-  // block (which renders ANSI for terminals).
-  return process.stdout.isTTY ?? true;
+  if (process.env.FORCE_COLOR === "3" || process.env.FORCE_COLOR === "true") return true;
+  const ct = (process.env.COLORTERM ?? "").toLowerCase();
+  return ct === "truecolor" || ct === "24bit";
 })();
 
-function ansi(code: string, s: string): string {
-  if (!COLOR_ENABLED) return s;
-  return `\x1b[${code}m${s}\x1b[0m`;
-}
-const c = {
-  dim: (s: string) => ansi("2", s),
-  bold: (s: string) => ansi("1", s),
-  cyan: (s: string) => ansi("36", s),
-  brightCyan: (s: string) => ansi("96", s),
-  green: (s: string) => ansi("32", s),
-  brightGreen: (s: string) => ansi("92", s),
-  yellow: (s: string) => ansi("33", s),
-  brightYellow: (s: string) => ansi("93", s),
-  magenta: (s: string) => ansi("35", s),
-  brightMagenta: (s: string) => ansi("95", s),
-  blue: (s: string) => ansi("34", s),
-  brightBlue: (s: string) => ansi("94", s),
-  red: (s: string) => ansi("31", s),
-  white: (s: string) => ansi("97", s),
-  gray: (s: string) => ansi("90", s),
+// Brand palette: green family for primary, slate for structural chrome
+const RGB = {
+  brand:     [0,   208, 156] as const,  // #00d09c  primary brand green
+  brandDim:  [0,   140, 100] as const,  // dimmer brand green
+  brandBold: [124, 255, 214] as const,  // #7cffd6  bright highlight
+  gold:      [220, 180,  50] as const,  // #dcb432  numbers / values
+  slate:     [120, 130, 145] as const,  // structural chrome
+  white:     [220, 225, 235] as const,  // labels
+  red:       [225,  91,  91] as const,  // errors
+  blue:      [ 90, 160, 230] as const,  // low-intensity bars
+  cyan:      [ 60, 200, 220] as const,  // mid-intensity bars
 };
 
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
+type RGBTriple = readonly [number, number, number];
 
-// Blended Sonnet rate per spec: $3/M input, $15/M output. Assume blended $5/M
-// for a rough but honest estimate — read-heavy workloads lean input-side.
-const BLENDED_USD_PER_MTOK = 5;
-
-function fmtUsd(tokens: number): string {
-  const c = (tokens * BLENDED_USD_PER_MTOK) / 1_000_000;
-  if (c < 0.01) return `$${c.toFixed(4)}`;
-  if (c < 1) return `$${c.toFixed(3)}`;
-  if (c < 100) return `$${c.toFixed(2)}`;
-  return `$${Math.round(c).toLocaleString()}`;
+function tc(rgb: RGBTriple, s: string): string {
+  if (!TRUECOLOR) return s;
+  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${s}\x1b[0m`;
+}
+function bold(s: string): string {
+  if (!TRUECOLOR) return s;
+  return `\x1b[1m${s}\x1b[22m`;
+}
+function dim(s: string): string {
+  if (!TRUECOLOR) return s;
+  return `\x1b[2m${s}\x1b[22m`;
 }
 
-function fmtTokens(n: number): string {
+// ---------------------------------------------------------------------------
+// Visible-width helpers — strip ANSI before measuring
+// ---------------------------------------------------------------------------
+
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+export function visibleWidth(s: string): number {
+  return Array.from(s.replace(ANSI_RE, "")).length;
+}
+
+function padEnd(s: string, w: number, ch = " "): string {
+  const pad = w - visibleWidth(s);
+  return pad > 0 ? s + ch.repeat(pad) : s;
+}
+
+function padStart(s: string, w: number, ch = " "): string {
+  const pad = w - visibleWidth(s);
+  return pad > 0 ? ch.repeat(pad) + s : s;
+}
+
+// ---------------------------------------------------------------------------
+// Number formatters
+// ---------------------------------------------------------------------------
+
+const BLENDED_USD_PER_MTOK = 5;
+
+export function fmtTokens(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0";
-  if (n < 1000) return String(Math.floor(n));
-  if (n < 1_000_000) return (n / 1000).toFixed(1) + "K";
-  if (n < 1_000_000_000) return (n / 1_000_000).toFixed(2) + "M";
-  return (n / 1_000_000_000).toFixed(2) + "B";
+  if (n < 1_000) return String(Math.floor(n));
+  if (n < 1_000_000) return (n / 1_000).toFixed(1) + "K";
+  return (n / 1_000_000).toFixed(2) + "M";
+}
+
+export function fmtUsd(tokens: number): string {
+  const cost = (tokens * BLENDED_USD_PER_MTOK) / 1_000_000;
+  if (cost < 0.01) return `~$${cost.toFixed(4)}`;
+  if (cost < 1) return `~$${cost.toFixed(3)}`;
+  if (cost < 100) return `~$${cost.toFixed(2)}`;
+  return `~$${Math.round(cost).toLocaleString()}`;
 }
 
 function fmtAge(iso: string | undefined): string {
@@ -132,59 +152,12 @@ function fmtAge(iso: string | undefined): string {
   const ms = Date.now() - t;
   if (ms < 0) return "just now";
   const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
+  if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ${h % 24}h ago`;
-}
-
-// Visual-width aware padding. ANSI escapes don't contribute to column width,
-// so we strip them when measuring. Unicode box-drawing chars are single-width
-// so plain .length works for non-ANSI text.
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-function visibleLen(s: string): number {
-  return s.replace(ANSI_RE, "").length;
-}
-function padEndV(s: string, width: number): string {
-  const pad = width - visibleLen(s);
-  return pad > 0 ? s + " ".repeat(pad) : s;
-}
-function padStartV(s: string, width: number): string {
-  const pad = width - visibleLen(s);
-  return pad > 0 ? " ".repeat(pad) + s : s;
-}
-
-// ---------------------------------------------------------------------------
-// Sparkline + bar chart
-// ---------------------------------------------------------------------------
-
-const SPARK = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-function sparkline(values: number[]): string {
-  if (values.length === 0) return "";
-  const max = Math.max(...values);
-  if (max <= 0) return SPARK[0]!.repeat(values.length);
-  return values
-    .map((v) => {
-      if (v <= 0) return c.gray(SPARK[0]!);
-      const idx = Math.max(1, Math.min(7, Math.ceil((v / max) * 7)));
-      // Color by intensity — low=blue, mid=cyan, high=green.
-      const glyph = SPARK[idx]!;
-      if (idx <= 2) return c.blue(glyph);
-      if (idx <= 5) return c.cyan(glyph);
-      return c.brightGreen(glyph);
-    })
-    .join("");
-}
-
-function hBar(value: number, max: number, width: number): string {
-  if (max <= 0 || value <= 0 || width <= 0) return "";
-  const filled = Math.max(1, Math.min(width, Math.round((value / max) * width)));
-  const empty = width - filled;
-  return c.brightCyan("█".repeat(filled)) + c.gray("░".repeat(empty));
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d`;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,13 +175,22 @@ function lastNDayKeys(n: number): string[] {
   return out;
 }
 
+function bestDay(byDay: ByDay): { date: string; tokens: number } | null {
+  let best: { date: string; tokens: number } | null = null;
+  for (const [date, v] of Object.entries(byDay)) {
+    const tok = v?.tokensSaved ?? 0;
+    if (!best || tok > best.tokens) best = { date, tokens: tok };
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------
 // Stats loading
 // ---------------------------------------------------------------------------
 
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
+export const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
 
-function loadStats(path = STATS_PATH): Stats | null {
+export function loadStats(path = STATS_PATH): Stats | null {
   try {
     if (!existsSync(path)) return null;
     const raw = readFileSync(path, "utf-8");
@@ -219,324 +201,292 @@ function loadStats(path = STATS_PATH): Stats | null {
 }
 
 // ---------------------------------------------------------------------------
-// Panel rendering — each panel returns an array of already-padded lines plus
-// its outer width. We stitch them together with the border routine below.
+// Dashboard width budget
 // ---------------------------------------------------------------------------
 
-const PANEL_WIDTH = 72;
-const INNER = PANEL_WIDTH - 2; // subtract the two side borders
-
-function panelTop(title: string): string {
-  const raw = ` ${title} `;
-  const dashes = PANEL_WIDTH - 2 - visibleLen(raw);
-  const left = Math.max(2, Math.floor(dashes / 2));
-  const right = Math.max(2, dashes - left);
-  return (
-    c.cyan("╔") +
-    c.cyan("═".repeat(left)) +
-    c.bold(c.brightCyan(raw)) +
-    c.cyan("═".repeat(right)) +
-    c.cyan("╗")
-  );
-}
-function panelBottom(): string {
-  return c.cyan("╚" + "═".repeat(PANEL_WIDTH - 2) + "╝");
-}
-function panelDivider(): string {
-  return c.cyan("╟") + c.gray("─".repeat(PANEL_WIDTH - 2)) + c.cyan("╢");
-}
-function panelLine(content = ""): string {
-  return c.cyan("║") + " " + padEndV(content, INNER - 2) + " " + c.cyan("║");
-}
-function panelEmpty(): string {
-  return c.cyan("║") + " ".repeat(PANEL_WIDTH - 2) + c.cyan("║");
-}
+// All content must fit in 80 visible columns.
+export const DASH_WIDTH = 78; // outer box spans 80 cols (border chars included)
+const INNER = DASH_WIDTH - 2;  // inner content width
 
 // ---------------------------------------------------------------------------
-// Actual dashboard sections
+// ASCII-art banner — block/shade chars, 3 lines, ≤70 cols
 // ---------------------------------------------------------------------------
 
-function renderNoData(): string {
-  const out: string[] = [];
-  out.push(panelTop("ashlr savings dashboard"));
-  out.push(panelEmpty());
-  out.push(panelLine(c.yellow("No stats.json found yet.")));
-  out.push(panelLine(c.dim(`Expected location: ${STATS_PATH}`)));
-  out.push(panelEmpty());
-  out.push(panelLine("Use the ashlr__read, ashlr__grep, and ashlr__edit"));
-  out.push(panelLine("MCP tools in place of the built-ins to start"));
-  out.push(panelLine("accumulating savings. This dashboard will light up"));
-  out.push(panelLine("after your first few calls."));
-  out.push(panelEmpty());
-  out.push(panelLine(c.dim("Tip: /ashlr-tour runs a 60s guided demo.")));
-  out.push(panelEmpty());
-  out.push(panelBottom());
-  return out.join("\n");
-}
+// Spell "ashlr" using Unicode block characters.
+// Each letter is 3 rows × varying cols. Letters separated by single space.
+// Chosen set: full-block + half-block for visual density.
+// Total width is held to ≤ 68 so it fits centered in 78 cols.
 
-function renderHeader(stats: Stats): string[] {
-  const life = stats.lifetime?.tokensSaved ?? 0;
-  const sess = stats.session?.tokensSaved ?? 0;
-  const lifeCost = fmtUsd(life);
-  const sessCost = fmtUsd(sess);
-  const age = fmtAge(stats.session?.startedAt);
+const BANNER_LINES = [
+  " ██╗  ███████╗██╗  ██╗██╗     ██████╗ ",
+  " ███╗ ██╔════╝██║  ██║██║     ██╔══██╗",
+  " ████╗███████╗███████║██║     ██████╔╝",
+  " ██╔══╝╚════██║██╔══██║██║     ██╔══██╗",
+  " ██║  ╚███████╗██║  ██║███████╗██║  ██║",
+  " ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝",
+];
 
-  const out: string[] = [];
-  out.push(panelTop("ashlr savings dashboard"));
-  out.push(panelEmpty());
-  // Two columns side by side — session left, lifetime right.
-  const colW = Math.floor((INNER - 2) / 2);
-  const headerL = c.bold(c.brightCyan("THIS SESSION")) + c.dim(`  ${age}`);
-  const headerR = c.bold(c.brightMagenta("ALL-TIME"));
-  const rowA = [
-    c.dim("  tokens  ") + c.brightGreen(fmtTokens(sess)),
-    c.dim("  tokens  ") + c.brightGreen(fmtTokens(life)),
-  ];
-  const rowB = [
-    c.dim("  cost    ") + c.brightYellow(sessCost),
-    c.dim("  cost    ") + c.brightYellow(lifeCost),
-  ];
-  const rowC = [
-    c.dim("  calls   ") + c.white(String(stats.session?.calls ?? 0)),
-    c.dim("  calls   ") + c.white(String(stats.lifetime?.calls ?? 0)),
-  ];
-  out.push(panelLine(padEndV(headerL, colW) + headerR));
-  out.push(panelLine(padEndV(rowA[0]!, colW) + rowA[1]));
-  out.push(panelLine(padEndV(rowB[0]!, colW) + rowB[1]));
-  out.push(panelLine(padEndV(rowC[0]!, colW) + rowC[1]));
-  out.push(panelEmpty());
-  out.push(
-    panelLine(
-      c.dim("  blended $5/M-tok · sonnet-4.5 pricing: $3/M in, $15/M out"),
-    ),
-  );
-  return out;
-}
+// Actual compact banner — built manually to stay within 70 cols
+// a  s  h  l  r   (5 chars × ~13 cols + spacing ≈ 68 cols total)
+const BANNER: string[] = [
+  "  ▄▄   ▄▄███▄  ▄  ▄  ██▄   ▄▀▀█",
+  "  ▀█▄ ▄█ █  █  █▀▀█  █  █  █▀▀ ",
+  "   ▀█▀  ███▀   █  █  █▀▀█▀ ▀▀▀▀",
+];
 
-function renderSessionBox(stats: Stats): string[] {
-  const sess = stats.session;
-  const out: string[] = [];
-  out.push(panelDivider());
-  out.push(panelLine(c.bold(c.cyan("SESSION BREAKDOWN"))));
-  out.push(panelEmpty());
-  if (!sess || (sess.calls ?? 0) === 0) {
-    out.push(panelLine(c.yellow("  No ashlr tool calls yet this session.")));
-    out.push(panelLine(c.dim("  Try ashlr__read on any file to get started.")));
-    return out;
+// Tagline under banner
+const TAGLINE = "  token-efficiency layer for claude code";
+
+function renderBanner(): string[] {
+  const lines: string[] = [];
+  // Top rule
+  lines.push(tc(RGB.slate, "─".repeat(DASH_WIDTH)));
+  for (const line of BANNER) {
+    lines.push(tc(RGB.brandBold, bold(line)));
   }
+  lines.push(tc(RGB.brandDim, TAGLINE));
+  lines.push(tc(RGB.slate, "─".repeat(DASH_WIDTH)));
+  return lines;
+}
 
-  // Capture ratio: what % of the lifetime total was earned in this session?
-  // Meaningful for long-running sessions on fresh installs.
-  const life = stats.lifetime?.tokensSaved ?? 0;
-  const ratio = life > 0 ? (sess.tokensSaved ?? 0) / life : 0;
-  const ratioStr = (ratio * 100).toFixed(1) + "%";
+// ---------------------------------------------------------------------------
+// Box drawing helpers
+// ---------------------------------------------------------------------------
 
-  out.push(
-    panelLine(
-      c.dim("  calls        ") +
-        c.white(String(sess.calls ?? 0).padStart(8)) +
-        "   " +
-        c.dim("started  ") +
-        c.white(fmtAge(sess.startedAt)),
-    ),
-  );
-  out.push(
-    panelLine(
-      c.dim("  tokens       ") +
-        c.brightGreen(fmtTokens(sess.tokensSaved ?? 0).padStart(8)) +
-        "   " +
-        c.dim("cost     ") +
-        c.brightYellow(fmtUsd(sess.tokensSaved ?? 0)),
-    ),
-  );
-  out.push(
-    panelLine(
-      c.dim("  % of all-time ") +
-        c.brightCyan(ratioStr.padStart(7)) +
-        "    " +
-        c.gray("(share earned this session)"),
-    ),
-  );
+function boxTop(title: string, width: number): string {
+  const inner = width - 2;
+  const titleStr = ` ${title} `;
+  const titleLen = visibleWidth(titleStr);
+  const dashes = Math.max(0, inner - titleLen);
+  const l = Math.floor(dashes / 2);
+  const r = dashes - l;
+  const raw =
+    "╭" +
+    "─".repeat(l) +
+    titleStr +
+    "─".repeat(r) +
+    "╮";
+  return tc(RGB.slate, "╭" + "─".repeat(l)) +
+    tc(RGB.brandBold, bold(titleStr)) +
+    tc(RGB.slate, "─".repeat(r) + "╮");
+}
+
+function boxBottom(width: number): string {
+  return tc(RGB.slate, "╰" + "─".repeat(width - 2) + "╯");
+}
+
+function boxLine(content: string, width: number): string {
+  const inner = width - 2;
+  const padded = padEnd(" " + content, inner);
+  return tc(RGB.slate, "│") + padded + tc(RGB.slate, "│");
+}
+
+function boxEmpty(width: number): string {
+  return tc(RGB.slate, "│") + " ".repeat(width - 2) + tc(RGB.slate, "│");
+}
+
+// ---------------------------------------------------------------------------
+// "At a glance" tile strip
+// 3 tiles side by side, total width ≤ 78
+// Each tile: 24 cols wide (22 inner + 2 border), gap = 1 space
+// 3 × 24 + 2 gaps = 74. Center-padding to 78: 2 each side → fine.
+// ---------------------------------------------------------------------------
+
+const TILE_W = 24; // total tile width including border chars
+
+function renderTileStrip(stats: Stats): string[] {
+  const sess = stats.session;
+  const life = stats.lifetime;
+  const bd = bestDay(life?.byDay ?? {});
+
+  const tiles: Array<{ title: string; line1: string; line2: string }> = [
+    {
+      title: "session",
+      line1: tc(RGB.brandBold, bold(fmtTokens(sess?.tokensSaved ?? 0))),
+      line2: tc(RGB.gold, fmtUsd(sess?.tokensSaved ?? 0)) +
+             tc(RGB.slate, dim(`  ${fmtAge(sess?.startedAt)}`)),
+    },
+    {
+      title: "lifetime",
+      line1: tc(RGB.brandBold, bold(fmtTokens(life?.tokensSaved ?? 0))),
+      line2: tc(RGB.gold, fmtUsd(life?.tokensSaved ?? 0)) +
+             tc(RGB.slate, dim(`  ${life?.calls ?? 0} calls`)),
+    },
+    {
+      title: "best day",
+      line1: tc(RGB.white, bd?.date ?? "none yet"),
+      line2: bd
+        ? tc(RGB.brandBold, bold(fmtTokens(bd.tokens))) + tc(RGB.slate, dim(" tok"))
+        : tc(RGB.slate, dim("no data")),
+    },
+  ];
+
+  // Each tile has 3 rows: top, line1, line2, bottom
+  const rows: string[][] = tiles.map(({ title, line1, line2 }) => [
+    boxTop(title, TILE_W),
+    boxLine(line1, TILE_W),
+    boxLine(line2, TILE_W),
+    boxBottom(TILE_W),
+  ]);
+
+  const out: string[] = [];
+  // Render row by row (interleave the 3 tiles)
+  for (let r = 0; r < rows[0]!.length; r++) {
+    out.push(rows.map((tile) => tile[r]).join("  "));
+  }
   return out;
 }
 
-const TOOL_NAMES = [
-  "ashlr__read",
-  "ashlr__grep",
-  "ashlr__edit",
-  "ashlr__sql",
-  "ashlr__bash",
-  "ashlr__http",
-  "ashlr__savings",
-] as const;
-type ToolName = (typeof TOOL_NAMES)[number];
+// ---------------------------------------------------------------------------
+// Per-tool horizontal bar chart
+// Top 8 tools sorted by lifetime tokensSaved descending.
+// Bar width: 24 cols. Line format:
+//   <name padded 16>  <bar 24>  <tok 6>  <pct 4>
+//   = 16 + 2 + 24 + 2 + 6 + 2 + 4 = 56 chars (fits in 78)
+// ---------------------------------------------------------------------------
 
-function renderByTool(stats: Stats): string[] {
+const BAR_WIDTH = 24;
+const BLOCK_CHARS = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
+
+function hBar(value: number, max: number, width: number): string {
+  if (max <= 0 || width <= 0) return " ".repeat(width);
+  const fraction = Math.max(0, Math.min(1, value / max));
+  const totalEighths = Math.round(fraction * width * 8);
+  const fullCells = Math.floor(totalEighths / 8);
+  const remainder = totalEighths % 8;
+
+  let bar = "";
+  // Color by fill level — low blue, mid cyan, high brand green
+  const fillLevel = fraction;
+  const barColor = fillLevel >= 0.7
+    ? RGB.brand
+    : fillLevel >= 0.35
+    ? RGB.cyan
+    : RGB.blue;
+
+  for (let i = 0; i < fullCells; i++) {
+    bar += tc(barColor, "█");
+  }
+  if (remainder > 0 && fullCells < width) {
+    bar += tc(barColor, BLOCK_CHARS[remainder - 1]!);
+    // Fill remainder with dim empty
+    bar += tc(RGB.slate, dim("░".repeat(width - fullCells - 1)));
+  } else if (fullCells < width) {
+    bar += tc(RGB.slate, dim("░".repeat(width - fullCells)));
+  }
+  return bar;
+}
+
+function renderBarChart(stats: Stats): string[] {
   const out: string[] = [];
-  out.push(panelDivider());
-  out.push(panelLine(c.bold(c.cyan("BY TOOL") + c.dim("  (lifetime)"))));
-  out.push(panelEmpty());
+  out.push("");
+  out.push(tc(RGB.brand, bold("  per-tool savings (lifetime)")));
+  out.push("");
 
   const byTool = stats.lifetime?.byTool ?? {};
-  // Include any tool key we see in the file, even if not in TOOL_NAMES — future-proofs
-  // the dashboard when new tools are added to the efficiency server.
-  const keys = new Set<string>([...TOOL_NAMES, ...Object.keys(byTool)]);
-  const rows = Array.from(keys)
-    .map((name) => {
-      const t = byTool[name] ?? {};
-      return {
-        name,
-        calls: t.calls ?? 0,
-        tokensSaved: t.tokensSaved ?? 0,
-      };
-    })
-    .filter((r) => r.calls > 0 || r.tokensSaved > 0)
-    .sort((a, b) => b.tokensSaved - a.tokensSaved);
+  const rows = Object.entries(byTool)
+    .map(([name, t]) => ({
+      name,
+      calls: t?.calls ?? 0,
+      tokensSaved: t?.tokensSaved ?? 0,
+    }))
+    .filter((r) => r.tokensSaved > 0)
+    .sort((a, b) => b.tokensSaved - a.tokensSaved)
+    .slice(0, 8);
 
   if (rows.length === 0) {
-    out.push(panelLine(c.yellow("  No tool usage recorded yet.")));
+    out.push(tc(RGB.gold, "  no tool usage recorded yet."));
     return out;
   }
 
-  const maxTok = Math.max(...rows.map((r) => r.tokensSaved), 1);
+  const maxTok = Math.max(...rows.map((r) => r.tokensSaved));
   const total = rows.reduce((s, r) => s + r.tokensSaved, 0);
-  const barWidth = 20;
 
   for (const r of rows) {
-    const name = c.white(r.name.padEnd(16));
-    const calls = c.dim(`${r.calls}× `.padStart(6));
-    const tok = c.brightGreen(fmtTokens(r.tokensSaved).padStart(7));
-    const bar = hBar(r.tokensSaved, maxTok, barWidth);
-    const pctStr =
-      total > 0
-        ? c.dim(` ${Math.round((r.tokensSaved / total) * 100)}%`.padStart(4))
-        : "";
-    out.push(panelLine(`  ${name}${calls}${tok}  ${bar}${pctStr}`));
-  }
-  return out;
-}
-
-function renderSparklineSection(
-  stats: Stats,
-  days: number,
-  label: string,
-): string[] {
-  const out: string[] = [];
-  out.push(panelDivider());
-  out.push(
-    panelLine(c.bold(c.cyan(label) + c.dim(`  (per-day tokens saved)`))),
-  );
-  out.push(panelEmpty());
-
-  const byDay = stats.lifetime?.byDay ?? {};
-  const keys = lastNDayKeys(days);
-  const values = keys.map((k) => byDay[k]?.tokensSaved ?? 0);
-  const max = Math.max(...values);
-  const total = values.reduce((s, v) => s + v, 0);
-  const activeDays = values.filter((v) => v > 0).length;
-  const avg = activeDays > 0 ? total / activeDays : 0;
-  const best = keys[values.indexOf(max)];
-
-  // The sparkline itself — one glyph per day, with colors by intensity.
-  const spark = sparkline(values);
-
-  // Axis labels: show first + middle + last date to anchor the timeline
-  // without cluttering a 30-day chart.
-  const firstLbl = keys[0]!.slice(5);
-  const lastLbl = keys[keys.length - 1]!.slice(5);
-  const axis =
-    c.dim(firstLbl) +
-    " ".repeat(Math.max(1, days - firstLbl.length - lastLbl.length)) +
-    c.dim(lastLbl);
-
-  out.push(panelLine("  " + spark));
-  out.push(panelLine("  " + axis));
-  out.push(panelEmpty());
-  out.push(
-    panelLine(
-      c.dim("  total    ") +
-        c.brightGreen(fmtTokens(total).padStart(8)) +
-        "   " +
-        c.dim("avg/day  ") +
-        c.white(fmtTokens(Math.round(avg))),
-    ),
-  );
-  if (max > 0 && best) {
-    out.push(
-      panelLine(
-        c.dim("  peak     ") +
-          c.brightYellow(fmtTokens(max).padStart(8)) +
-          "   " +
-          c.dim("on       ") +
-          c.white(best),
-      ),
+    const name = padEnd(tc(RGB.white, r.name), 16 + (TRUECOLOR ? 14 : 0));
+    const bar = hBar(r.tokensSaved, maxTok, BAR_WIDTH);
+    const tok = padStart(tc(RGB.brandBold, fmtTokens(r.tokensSaved)), 6 + (TRUECOLOR ? 14 : 0));
+    const pct = padStart(
+      tc(RGB.slate, dim(Math.round((r.tokensSaved / total) * 100) + "%")),
+      4 + (TRUECOLOR ? 9 : 0),
     );
+    // Plain-text version: name(16) + space(2) + bar(24) + space(2) + tok(6) + space(1) + pct
+    out.push(`  ${name}  ${bar}  ${tok} ${pct}`);
   }
-  out.push(
-    panelLine(
-      c.dim("  active   ") +
-        c.white(`${activeDays}/${days}`.padStart(8)) +
-        "   " +
-        c.dim("days     "),
-    ),
-  );
   return out;
 }
 
-function renderTopProjects(stats: Stats): string[] {
-  const byProject: ByProject = {
-    ...(stats.lifetime?.byProject ?? {}),
-  };
-  // Merge session per-project if present so we don't miss fresh activity.
-  if (stats.session?.byProject) {
-    for (const [k, v] of Object.entries(stats.session.byProject)) {
-      if (!v) continue;
-      const existing = byProject[k] ?? { calls: 0, tokensSaved: 0 };
-      byProject[k] = {
-        calls: (existing.calls ?? 0) + (v.calls ?? 0),
-        tokensSaved: (existing.tokensSaved ?? 0) + (v.tokensSaved ?? 0),
-      };
+// ---------------------------------------------------------------------------
+// Sparklines — 7d and 30d
+// One Unicode block char per day, capped at 20 cells, labeled.
+// ---------------------------------------------------------------------------
+
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+function sparkGlyph(value: number, max: number): string {
+  if (value <= 0 || max <= 0) return tc(RGB.slate, dim("▁"));
+  const idx = Math.max(0, Math.min(7, Math.ceil((value / max) * 7) - 1));
+  const fraction = value / max;
+  const color = fraction >= 0.7 ? RGB.brand : fraction >= 0.35 ? RGB.cyan : RGB.blue;
+  return tc(color, SPARK_CHARS[idx]!);
+}
+
+function renderSparklines(stats: Stats): string[] {
+  const byDay = stats.lifetime?.byDay ?? {};
+  const out: string[] = [];
+  out.push("");
+  out.push(tc(RGB.brand, bold("  activity sparklines")));
+  out.push("");
+
+  const MAX_CELLS = 20;
+
+  for (const [days, label] of [[7, "last 7d "], [30, "last 30d"]] as Array<[number, string]>) {
+    const keys = lastNDayKeys(days);
+    const values = keys.map((k) => byDay[k]?.tokensSaved ?? 0);
+    // Truncate to MAX_CELLS (30d → 20 cells, every 1.5th day; 7d fits fine)
+    const step = days > MAX_CELLS ? days / MAX_CELLS : 1;
+    const sampled: number[] = [];
+    if (step > 1) {
+      // Average buckets for 30d → 20 cells
+      const cellCount = MAX_CELLS;
+      for (let i = 0; i < cellCount; i++) {
+        const start = Math.floor(i * step);
+        const end = Math.min(values.length, Math.floor((i + 1) * step));
+        const bucket = values.slice(start, end);
+        sampled.push(bucket.reduce((s, v) => s + v, 0));
+      }
+    } else {
+      sampled.push(...values);
+    }
+
+    const max = Math.max(...sampled);
+    const spark = sampled.map((v) => sparkGlyph(v, max)).join("");
+    const totalTok = values.reduce((s, v) => s + v, 0);
+    const activeDays = values.filter((v) => v > 0).length;
+    const suffix =
+      max > 0
+        ? tc(RGB.slate, dim(`  total ${fmtTokens(totalTok)}  active ${activeDays}/${days}d`))
+        : tc(RGB.slate, dim("  no data"));
+
+    out.push(
+      `  ${tc(RGB.white, label)}  ${spark}${suffix}`,
+    );
+
+    // Peak annotation on busiest day (7d only — 30d too wide)
+    if (days === 7 && max > 0) {
+      const peakIdx = values.indexOf(max);
+      const peakDate = keys[peakIdx] ?? "";
+      out.push(
+        `           ${" ".repeat(peakIdx)}${tc(RGB.gold, "^")}  ${tc(RGB.slate, dim(`peak ${peakDate.slice(5)} (${fmtTokens(max)})`))}`,
+      );
     }
   }
-
-  const entries = Object.entries(byProject)
-    .map(([path, v]) => ({
-      path,
-      calls: v?.calls ?? 0,
-      tokensSaved: v?.tokensSaved ?? 0,
-    }))
-    .filter((r) => r.tokensSaved > 0 || r.calls > 0)
-    .sort((a, b) => b.tokensSaved - a.tokensSaved)
-    .slice(0, 5);
-
-  // If there's no per-project data, don't render the panel at all — the
-  // efficiency server doesn't currently track this, so we don't want to
-  // surface an empty section.
-  if (entries.length === 0) return [];
-
-  const out: string[] = [];
-  out.push(panelDivider());
-  out.push(panelLine(c.bold(c.cyan("TOP PROJECTS") + c.dim("  (lifetime)"))));
-  out.push(panelEmpty());
-
-  const max = Math.max(...entries.map((e) => e.tokensSaved), 1);
-  for (const [i, e] of entries.entries()) {
-    // Show just the basename + one parent, truncated. Full paths clutter.
-    const parts = e.path.split("/");
-    const shortPath =
-      parts.length >= 2
-        ? parts.slice(-2).join("/")
-        : e.path;
-    const truncated =
-      shortPath.length > 28 ? "…" + shortPath.slice(-27) : shortPath;
-    const rank = c.dim(`  ${i + 1}.`);
-    const name = c.white(padEndV(truncated, 30));
-    const tok = c.brightGreen(fmtTokens(e.tokensSaved).padStart(7));
-    const bar = hBar(e.tokensSaved, max, 16);
-    out.push(panelLine(`${rank} ${name} ${tok}  ${bar}`));
-  }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Projected annual
+// ---------------------------------------------------------------------------
 
 function renderProjection(stats: Stats): string[] {
   const byDay = stats.lifetime?.byDay ?? {};
@@ -546,101 +496,175 @@ function renderProjection(stats: Stats): string[] {
   const total = values.reduce((s, v) => s + v, 0);
 
   const out: string[] = [];
-  out.push(panelDivider());
-  out.push(panelLine(c.bold(c.cyan("PROJECTED ANNUAL"))));
-  out.push(panelEmpty());
+  out.push("");
+  out.push(tc(RGB.brand, bold("  projected annual savings")));
+  out.push("");
 
-  // Require at least 3 active days in the last 30 before projecting — a
-  // single burst day extrapolated out is misleading snake-oil. The
-  // lookback-window length (30d) is also the denominator: projection is
-  // total * (365 / 30) when we have enough density.
   if (activeDays < 3 || total === 0) {
-    out.push(
-      panelLine(
-        c.yellow(
-          "  Not enough history yet — projection unlocks after ≥3 active days.",
-        ),
-      ),
-    );
-    out.push(
-      panelLine(
-        c.dim(
-          `  Currently tracking ${activeDays} active day(s) in the last 30.`,
-        ),
-      ),
-    );
+    out.push(tc(RGB.gold, `  not enough history — projection unlocks after ≥3 active days.`));
+    out.push(tc(RGB.slate, dim(`  currently tracking ${activeDays} active day(s) in the last 30.`)));
     return out;
   }
 
   const annualTokens = Math.round((total * 365) / 30);
   const annualCost = fmtUsd(annualTokens);
+  const annualCalls = Math.round(((stats.lifetime?.calls ?? 0) / Math.max(1, activeDays)) * 220);
 
-  // Also compute an "active-day rate" — tokens per active working day,
-  // extrapolated across a 220-workday year. This is often the more honest
-  // number for bursty workers.
+  // Active-day workday extrapolation
   const perActive = total / activeDays;
   const workdayTokens = Math.round(perActive * 220);
   const workdayCost = fmtUsd(workdayTokens);
 
+  const colL = 22;
+  const col1 = 10;
+  const col2 = 12;
+
   out.push(
-    panelLine(
-      c.dim("  30d extrapolation   ") +
-        c.brightGreen(fmtTokens(annualTokens).padStart(9)) +
-        c.dim("  tokens/yr   ") +
-        c.brightYellow(annualCost),
-    ),
+    padEnd(tc(RGB.slate, dim("  30d rolling × 12")), colL) +
+    padStart(tc(RGB.brandBold, bold(fmtTokens(annualTokens))), col1) +
+    " tok/yr  " +
+    tc(RGB.gold, annualCost),
   );
   out.push(
-    panelLine(
-      c.dim("  active-day × 220    ") +
-        c.brightGreen(fmtTokens(workdayTokens).padStart(9)) +
-        c.dim("  tokens/yr   ") +
-        c.brightYellow(workdayCost),
-    ),
-  );
-  out.push(panelEmpty());
-  out.push(
-    panelLine(
-      c.dim(
-        "  extrapolation = recent trajectory × (365/30). Not a forecast —",
-      ),
-    ),
+    padEnd(tc(RGB.slate, dim("  active-day × 220")), colL) +
+    padStart(tc(RGB.brandBold, bold(fmtTokens(workdayTokens))), col1) +
+    " tok/yr  " +
+    tc(RGB.gold, workdayCost),
   );
   out.push(
-    panelLine(
-      c.dim("  just a yardstick for what today's rate would compound to."),
-    ),
+    padEnd(tc(RGB.slate, dim("  calls extrapolation")), colL) +
+    padStart(tc(RGB.white, String(annualCalls)), col1) +
+    " calls/yr",
   );
+  out.push("");
+  out.push(tc(RGB.slate, dim("  projection based on last 30d average — may vary.")));
+
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Top 3 projects (from session-log.jsonl)
+// ---------------------------------------------------------------------------
+
+function renderTopProjects(statsHome?: string): string[] {
+  const projects = buildTopProjects(statsHome).slice(0, 3);
+  const out: string[] = [];
+  if (projects.length === 0) return out;
+
+  out.push("");
+  out.push(tc(RGB.brand, bold("  top projects")));
+  out.push("");
+
+  const maxCalls = Math.max(...projects.map((p) => p.calls));
+  for (const [i, p] of projects.entries()) {
+    const name = p.name.length > 28 ? "..." + p.name.slice(-25) : p.name;
+    const rankStr = tc(RGB.slate, dim(`${i + 1}.`));
+    const nameStr = padEnd(tc(RGB.white, name), 30 + (TRUECOLOR ? 14 : 0));
+    const callsStr = padStart(tc(RGB.brandBold, String(p.calls)), 5 + (TRUECOLOR ? 14 : 0));
+    const miniBar = hBar(p.calls, maxCalls, 12);
+    const toolStr = tc(RGB.slate, dim(` ${p.toolVariety} tool${p.toolVariety === 1 ? "" : "s"}`));
+    out.push(`  ${rankStr} ${nameStr} ${callsStr}x  ${miniBar}${toolStr}`);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Empty stats fallback
+// ---------------------------------------------------------------------------
+
+function renderNoData(): string {
+  const lines: string[] = [];
+  lines.push(...renderBanner());
+  lines.push("");
+  lines.push(
+    tc(RGB.gold,
+      "  no savings recorded yet — run /ashlr-demo to see the plugin in action."
+    )
+  );
+  lines.push("");
+  lines.push(tc(RGB.slate, dim(`  stats path: ${STATS_PATH}`)));
+  lines.push(tc(RGB.slate, dim("  use ashlr__read, ashlr__grep, or ashlr__edit to start.")));
+  lines.push("");
+  lines.push(tc(RGB.slate, "─".repeat(DASH_WIDTH)));
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Divider helper
+// ---------------------------------------------------------------------------
+
+function divider(label?: string): string {
+  if (!label) return tc(RGB.slate, dim("  " + "·".repeat(DASH_WIDTH - 2)));
+  const inner = label;
+  const dashes = Math.max(4, DASH_WIDTH - visibleWidth(inner) - 4);
+  return tc(RGB.slate, dim("  ")) + tc(RGB.slate, inner) + tc(RGB.slate, dim(" " + "·".repeat(dashes)));
 }
 
 // ---------------------------------------------------------------------------
 // Top-level renderer
 // ---------------------------------------------------------------------------
 
-export function render(stats: Stats | null): string {
+export function render(stats: Stats | null, statsHome?: string): string {
   if (!stats) return renderNoData();
 
   const parts: string[] = [];
-  parts.push(...renderHeader(stats));
-  parts.push(...renderSessionBox(stats));
-  parts.push(...renderByTool(stats));
-  parts.push(...renderSparklineSection(stats, 7, "LAST 7 DAYS"));
-  parts.push(...renderSparklineSection(stats, 30, "LAST 30 DAYS"));
-  parts.push(...renderTopProjects(stats));
+  parts.push(...renderBanner());
+  parts.push("");
+  parts.push(...renderTileStrip(stats));
+  parts.push(...renderBarChart(stats));
+  parts.push(divider());
+  parts.push(...renderSparklines(stats));
+  parts.push(divider());
   parts.push(...renderProjection(stats));
-  parts.push(panelEmpty());
-  parts.push(panelBottom());
+  parts.push(divider());
+  parts.push(...renderTopProjects(statsHome));
+  parts.push("");
+  parts.push(tc(RGB.slate, dim(`  data: ${STATS_PATH}  ·  blended $5/M-tok`)));
+  parts.push(tc(RGB.slate, "─".repeat(DASH_WIDTH)));
 
-  // Footer outside the panel — pricing + data source note.
-  const footer = [
-    "",
-    c.dim(
-      `data: ${STATS_PATH}  ·  blended $5/M-tok  ·  run /ashlr-savings for the text-only summary`,
-    ),
-  ].join("\n");
+  return parts.join("\n");
+}
 
-  return parts.join("\n") + "\n" + footer;
+// ---------------------------------------------------------------------------
+// Watch mode
+// ---------------------------------------------------------------------------
+
+const WATCH_INTERVAL_MS = 1500;
+
+function clearScreen(): void {
+  process.stdout.write("\x1b[2J\x1b[H");
+}
+
+async function watchMode(statsPath: string): Promise<void> {
+  // Skip watch when not a TTY
+  if (!process.stdin.isTTY) {
+    const stats = loadStats(statsPath);
+    process.stdout.write(render(stats) + "\n");
+    return;
+  }
+
+  // Initial render
+  clearScreen();
+  process.stdout.write(render(loadStats(statsPath)) + "\n");
+
+  const interval = setInterval(() => {
+    clearScreen();
+    process.stdout.write(render(loadStats(statsPath)) + "\n");
+  }, WATCH_INTERVAL_MS);
+
+  // Clean exit on Ctrl-C
+  process.on("SIGINT", () => {
+    clearInterval(interval);
+    process.stdout.write("\n");
+    process.exit(0);
+  });
+
+  // Also exit cleanly if stdin closes (non-interactive pipe)
+  process.stdin.resume();
+  process.stdin.on("close", () => {
+    clearInterval(interval);
+    process.exit(0);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -648,15 +672,17 @@ export function render(stats: Stats | null): string {
 // ---------------------------------------------------------------------------
 
 if (import.meta.main) {
+  const watch = process.argv.includes("--watch");
   try {
-    const stats = loadStats();
-    process.stdout.write(render(stats) + "\n");
+    if (watch) {
+      await watchMode(STATS_PATH);
+    } else {
+      const stats = loadStats();
+      process.stdout.write(render(stats) + "\n");
+    }
   } catch (err) {
-    // Guard: never crash the slash command. Surface the error and bail.
     const msg = err instanceof Error ? err.message : String(err);
-    process.stdout.write(
-      c.red("ashlr savings dashboard failed: ") + msg + "\n",
-    );
+    process.stdout.write(tc(RGB.red, "ashlr dashboard failed: ") + msg + "\n");
   }
-  process.exit(0);
+  if (!watch) process.exit(0);
 }

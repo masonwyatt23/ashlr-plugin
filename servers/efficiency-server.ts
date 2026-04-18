@@ -31,8 +31,9 @@ import {
   snipCompact,
 } from "@ashlr/core-efficiency";
 import { retrieveCached } from "./_genome-cache";
+import { refreshGenomeAfterEdit } from "./_genome-live";
 
-import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { summarizeIfLarge, PROMPTS, confidenceBadge, confidenceTier } from "./_summarize";
 import { logEvent } from "./_events";
 import { findParentGenome } from "../scripts/genome-link";
 import { getCalibrationMultiplier } from "../scripts/read-calibration";
@@ -119,9 +120,18 @@ function lastNDays(n: number): string[] {
   return out;
 }
 
+// ASCII banner displayed at the top of every /ashlr-savings report.
+// Must stay under 60 visible chars wide (tests assert <= 80).
+export const SAVINGS_BANNER = [
+  "  \u2584\u2580\u2588 \u2588\u2580\u2588 \u2588 \u2588 \u2588   \u2588\u2580\u2588",
+  "  \u2588\u2580\u2588 \u2584\u2588 \u2588\u2580\u2588 \u2588\u2584\u2588   \u2588\u2580\u2580    token-efficient file tools",
+].join("\n");
+
 function renderSavings(session: SessionBucket, lifetime: LifetimeBucket, extra?: ExtraContext): string {
   const model = pricingModel();
   const lines: string[] = [];
+  lines.push(SAVINGS_BANNER);
+  lines.push("");
   lines.push(`ashlr savings · session started ${formatAge(session.startedAt)} · model ${model}`);
   lines.push("");
   // Summary columns
@@ -238,7 +248,7 @@ interface ReadCacheEntry {
 }
 const readCache: Map<string, ReadCacheEntry> = new Map();
 
-async function ashlrRead(input: { path: string; bypassSummary?: boolean }): Promise<string> {
+export async function ashlrRead(input: { path: string; bypassSummary?: boolean }): Promise<string> {
   const abs = resolve(input.path);
 
   // Cache hit path: same absolute path + unchanged mtime → return cached
@@ -295,14 +305,27 @@ async function ashlrRead(input: { path: string; bypassSummary?: boolean }): Prom
   const finalBytes = summarized.summarized || summarized.fellBack ? summarized.outputBytes : out.length;
   await recordSaving(content.length, finalBytes, "ashlr__read");
 
+  const badgeOpts = {
+    toolName: "ashlr__read",
+    rawBytes: content.length,
+    outputBytes: finalBytes,
+    fellBack: summarized.fellBack,
+    extra: mtimeMs > 0 ? `mtime=${mtimeMs}` : undefined,
+  };
+  if (confidenceTier(badgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__read", reason: "low-confidence" });
+  }
+  const badge = confidenceBadge(badgeOpts);
+  const finalTextWithBadge = finalText + badge;
+
   // Cache the fully computed result for this (path, mtimeMs). Skip caching
   // when bypassSummary was used — that's an opt-out path and shouldn't
   // poison future non-bypass calls.
   if (input.bypassSummary !== true && mtimeMs > 0) {
-    readCache.set(abs, { mtimeMs, result: finalText, sourceBytes: content.length });
+    readCache.set(abs, { mtimeMs, result: finalTextWithBadge, sourceBytes: content.length });
   }
 
-  return finalText;
+  return finalTextWithBadge;
 }
 
 /**
@@ -361,7 +384,7 @@ function estimateMatchCount(pattern: string, cwd: string): number | null {
   }
 }
 
-async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?: boolean }): Promise<string> {
+export async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?: boolean }): Promise<string> {
   const cwd = input.cwd ?? process.cwd();
 
   // Prefer the local genome. If none, walk up to 4 parents (capped at $HOME)
@@ -436,7 +459,15 @@ async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?:
                 : ""
             }`;
       const header = `[ashlr__grep] genome-retrieved ${sections.length} section(s)${parentNote}${countNote}`;
-      return `${header}\n\n${formatted}`;
+      const genomeBadgeOpts = {
+        toolName: "ashlr__grep",
+        rawBytes: Math.round(rawBytesEstimate),
+        outputBytes: formatted.length,
+      };
+      if (confidenceTier(genomeBadgeOpts) === "low") {
+        await logEvent("tool_noop", { tool: "ashlr__grep", reason: "low-confidence" });
+      }
+      return `${header}\n\n${formatted}` + confidenceBadge(genomeBadgeOpts);
     }
   }
 
@@ -454,7 +485,16 @@ async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?:
     bypass: input.bypassSummary === true,
   });
   await recordSaving(raw.length, summarized.outputBytes, "ashlr__grep");
-  return summarized.text || "[no matches]";
+  const rgBadgeOpts = {
+    toolName: "ashlr__grep",
+    rawBytes: raw.length,
+    outputBytes: summarized.outputBytes,
+    fellBack: summarized.fellBack,
+  };
+  if (confidenceTier(rgBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__grep", reason: "low-confidence" });
+  }
+  return (summarized.text || "[no matches]") + confidenceBadge(rgBadgeOpts);
 }
 
 interface EditArgs {
@@ -497,6 +537,7 @@ async function ashlrEdit(input: EditArgs): Promise<EditResult> {
     : original.split(search).join(replace);
 
   await writeFile(abs, updated, "utf-8");
+  refreshGenomeAfterEdit(abs, original, updated).catch(() => {});
 
   // Token accounting: a naive Edit would ship full before+after (2× file). We
   // ship only the diff summary below. Record the savings.
@@ -616,5 +657,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (import.meta.main) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

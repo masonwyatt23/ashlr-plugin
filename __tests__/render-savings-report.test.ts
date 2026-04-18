@@ -20,6 +20,7 @@ import {
   type ProjectInfo,
 } from "../scripts/savings-report-extras";
 import type { LifetimeBucket } from "../servers/_stats";
+import { SAVINGS_BANNER } from "../servers/efficiency-server";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -215,6 +216,29 @@ describe("buildTopProjects", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// SAVINGS_BANNER
+// ---------------------------------------------------------------------------
+
+describe("SAVINGS_BANNER", () => {
+  test("banner is non-empty and contains two lines", () => {
+    const lines = SAVINGS_BANNER.split("\n");
+    expect(lines.length).toBe(2);
+    expect(lines[0]!.trim().length).toBeGreaterThan(0);
+    expect(lines[1]!.trim().length).toBeGreaterThan(0);
+  });
+
+  test("every banner line is under 80 visible chars", () => {
+    for (const line of SAVINGS_BANNER.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test("banner contains 'token-efficient' descriptor", () => {
+    expect(SAVINGS_BANNER).toContain("token-efficient");
+  });
+});
+
 describe("readCalibrationState", () => {
   let home: string;
 
@@ -313,6 +337,16 @@ describe("ashlr__savings e2e — new sections", () => {
     const r = responses.find((x) => x.id === 2)!;
     return r.result.content[0].text as string;
   }
+
+  test("banner appears exactly once at the top of the output", async () => {
+    const text = await savings(home);
+    // Banner first line must appear, and only once.
+    const bannerFirstLine = SAVINGS_BANNER.split("\n")[0]!;
+    const occurrences = text.split(bannerFirstLine).length - 1;
+    expect(occurrences).toBe(1);
+    // Must be the very start of the output (ignoring leading whitespace on the line).
+    expect(text.trimStart().startsWith(bannerFirstLine.trimStart())).toBe(true);
+  });
 
   test("calibration line always present — estimated when file absent", async () => {
     const text = await savings(home);

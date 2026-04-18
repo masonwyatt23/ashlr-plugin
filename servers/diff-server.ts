@@ -25,8 +25,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { summarizeIfLarge, PROMPTS, confidenceBadge, confidenceTier } from "./_summarize";
 import { recordSaving as recordSavingCore } from "./_stats";
+import { logEvent } from "./_events";
 
 async function recordSaving(
   rawBytes: number,
@@ -300,8 +301,18 @@ async function ashlrDiff(args: DiffArgs): Promise<string> {
   const footer = `\n\n[ashlr__diff \u00b7 mode=${mode}]`;
   const text = body + footer;
 
-  await recordSaving(Math.max(rawBytes, body.length), text.length, "ashlr__diff");
-  return text;
+  const diffRawBytes = Math.max(rawBytes, body.length);
+  await recordSaving(diffRawBytes, text.length, "ashlr__diff");
+
+  const diffBadgeOpts = {
+    toolName: "ashlr__diff",
+    rawBytes: diffRawBytes,
+    outputBytes: text.length,
+  };
+  if (confidenceTier(diffBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__diff", reason: "low-confidence" });
+  }
+  return text + confidenceBadge(diffBadgeOpts);
 }
 
 // ---------------------------------------------------------------------------

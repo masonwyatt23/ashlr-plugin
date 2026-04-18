@@ -22,8 +22,9 @@ import {
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync } from "fs";
 import { isAbsolute, join, resolve } from "path";
-import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { summarizeIfLarge, PROMPTS, confidenceBadge, confidenceTier } from "./_summarize";
 import { recordSaving as recordSavingCore } from "./_stats";
+import { logEvent } from "./_events";
 
 async function recordSaving(rawChars: number, compactChars: number): Promise<void> {
   await recordSavingCore(rawChars, compactChars, "ashlr__sql");
@@ -421,7 +422,16 @@ async function ashlrSql(input: SqlArgs): Promise<string> {
   }
 
   await recordSaving(baselineBytes, finalText.length);
-  return finalText;
+
+  const sqlBadgeOpts = {
+    toolName: "ashlr__sql",
+    rawBytes: baselineBytes,
+    outputBytes: finalText.length,
+  };
+  if (confidenceTier(sqlBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__sql", reason: "low-confidence" });
+  }
+  return finalText + confidenceBadge(sqlBadgeOpts);
 }
 
 // ---------------------------------------------------------------------------

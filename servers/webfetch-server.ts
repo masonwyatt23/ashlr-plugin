@@ -15,6 +15,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { recordSaving } from "./_stats";
+import { confidenceBadge, confidenceTier } from "./_summarize";
+import { logEvent } from "./_events";
 import { isPrivateHost, compressHtml, compressJson } from "./_http-helpers";
 
 // ---------- types ----------
@@ -110,7 +112,15 @@ async function doWebFetch(args: WebFetchArgs): Promise<string> {
     `\n[ashlr__webfetch] URL: ${url} · raw: ${rawBytes}bytes · extracted: ${compactBytes}bytes · ${ratio}% reduction`,
   );
 
-  return lines.join("\n");
+  const webBadgeOpts = {
+    toolName: "ashlr__webfetch",
+    rawBytes,
+    outputBytes: compactBytes,
+  };
+  if (confidenceTier(webBadgeOpts) === "low") {
+    await logEvent("tool_noop", { tool: "ashlr__webfetch", reason: "low-confidence" });
+  }
+  return lines.join("\n") + confidenceBadge(webBadgeOpts);
 }
 
 // ---------- MCP wiring ----------

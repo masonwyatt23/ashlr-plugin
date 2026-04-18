@@ -190,6 +190,29 @@ export function computePulse(frame: number, msSinceActive: number, width: number
   return { position, intensity };
 }
 
+/**
+ * Per-cell blend factor for the sweep-with-trail effect.
+ *
+ * The sweep reads as directed motion (L→R) via a 3-cell gradient:
+ *   lead cell  (i === head)     → full brightness (factor 1.0)
+ *   trail cell (i === head - 1) → half brightness (factor 0.45)
+ *   dim cell   (i === head - 2) → faint echo       (factor 0.15)
+ *   all others                  → no pulse effect  (factor 0.0)
+ *
+ * All indices wrap modulo `width` so the effect is seamless at the edges.
+ * The returned factor is multiplied by `pulse.intensity` before blending so
+ * the whole sweep fades together during the 4–4.5s window.
+ */
+export function sweepFactor(cellIndex: number, headCell: number, width: number): number {
+  const w = Math.max(1, width);
+  const delta = ((cellIndex - headCell) % w + w) % w;
+  // delta 0 = lead, delta w-1 = one behind (i.e. trail), delta w-2 = dim echo.
+  if (delta === 0) return 1.0;
+  if (delta === w - 1) return 0.45;
+  if (delta === w - 2) return 0.15;
+  return 0.0;
+}
+
 // ---------------------------------------------------------------------------
 // Heartbeat glyph (single char between "ashlr" and the sparkline)
 // ---------------------------------------------------------------------------
@@ -250,15 +273,20 @@ export function renderSparkline({ values, frame, msSinceActive, cap }: RenderSpa
   }
   const ts = gradientTs(chars.length, frame);
   const pulse = computePulse(frame, msSinceActive, chars.length);
-  const pulseCell = pulse.intensity > 0
+  // Head cell of the 3-cell sweep (lead → trail → dim-echo).
+  const headCell = pulse.intensity > 0
     ? Math.floor(pulse.position * chars.length) % chars.length
     : -1;
   const parts: string[] = [];
   for (let i = 0; i < chars.length; i++) {
     const base = lerpColor(BRAND_DARK, BRAND_LIGHT, ts[i] ?? 0);
-    const color = i === pulseCell
-      ? lerpColor(base, PULSE_CELL, pulse.intensity)
-      : base;
+    let color = base;
+    if (headCell >= 0) {
+      const factor = sweepFactor(i, headCell, chars.length) * pulse.intensity;
+      if (factor > 0) {
+        color = lerpColor(base, PULSE_CELL, factor);
+      }
+    }
     parts.push(`${fg(color)}${chars[i]}`);
   }
   parts.push(RESET);
@@ -276,4 +304,85 @@ export function visibleWidth(s: string): number {
   // — in the status line we control the glyph set and all our chars are
   // narrow so this is fine).
   return Array.from(stripped).length;
+}
+
+// ---------------------------------------------------------------------------
+// Context-pressure widget
+// ---------------------------------------------------------------------------
+
+/** Color tiers for context pressure. */
+const CTX_GREEN:  RGB = { r: 0,   g: 160, b: 120 }; // dim brand-green
+const CTX_YELLOW: RGB = { r: 212, g: 167, b: 44  }; // #d4a72c
+const CTX_ORANGE: RGB = { r: 217, g: 121, b: 58  }; // #d9793a
+const CTX_RED:    RGB = { r: 225, g: 91,  b: 91  }; // #e15b5b
+
+/**
+ * Render the context-pressure micro-widget for a given percentage (0–100).
+ *
+ * Returns a string like `ctx: 72%` (8–9 visible chars). When `cap.truecolor`
+ * is false the string is returned plain (no ANSI). Never lies — callers must
+ * only call this when they have a real percentage.
+ *
+ * Color tiers:
+ *   0–60%:  dim brand-green
+ *   60–80%: yellow  (#d4a72c)
+ *   80–95%: orange  (#d9793a)
+ *   95%+:   red + bold (#e15b5b)
+ */
+export function renderContextPressure(pct: number, cap: Capability): string {
+  const label = `ctx: ${Math.round(pct)}%`;
+  if (!cap.truecolor) return label;
+
+  let color: RGB;
+  let bold = false;
+  if (pct >= 95) {
+    color = CTX_RED;
+    bold = true;
+  } else if (pct >= 80) {
+    color = CTX_ORANGE;
+  } else if (pct >= 60) {
+    color = CTX_YELLOW;
+  } else {
+    color = CTX_GREEN;
+  }
+
+  const boldOn  = bold ? "\x1b[1m" : "";
+  const boldOff = bold ? "\x1b[22m" : "";
+  return `${fg(color)}${boldOn}${label}${boldOff}${RESET}`;
+}
+
+// ---------------------------------------------------------------------------
+// Activity indicator (single glyph next to session counter)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a single-character activity indicator when `msSinceActive` is within
+ * the active window (4 seconds), or an empty string when idle.
+ *
+ * Width contract: always 0 or 1 visible character — never changes the column
+ * count of the surrounding text by more than 1.
+ *
+ * Active states:
+ *   truecolor + unicode: "↑" rendered in BRAND_LIGHT green  → 1 visible char
+ *   plain unicode:       "↑"  plain                         → 1 visible char
+ *   ASCII fallback:      "+"  plain                         → 1 visible char
+ *
+ * Idle: "" (empty string, 0 visible chars).
+ *
+ * The caller decides whether to include the indicator in the `session +N`
+ * segment. Typical usage: `session ${activityIndicator(...)}+N`.
+ */
+export const ACTIVITY_ACTIVE_MS = 4_000;
+export const ACTIVITY_GLYPH_UNICODE = "\u2191"; // ↑ UPWARDS ARROW
+export const ACTIVITY_GLYPH_ASCII   = "+";
+
+export function activityIndicator(msSinceActive: number, cap: Capability): string {
+  if (!Number.isFinite(msSinceActive) || msSinceActive > ACTIVITY_ACTIVE_MS) return "";
+  const glyph = cap.unicode ? ACTIVITY_GLYPH_UNICODE : ACTIVITY_GLYPH_ASCII;
+  if (!cap.truecolor) return glyph;
+  // Pulse color: full BRAND_LIGHT right after a save, fading to BRAND_DARK
+  // as we approach the 4s boundary.
+  const t = msSinceActive / ACTIVITY_ACTIVE_MS; // 0 = fresh, 1 = about to expire
+  const color = lerpColor(BRAND_LIGHT, BRAND_DARK, t);
+  return `${fg(color)}${glyph}${RESET}`;
 }
