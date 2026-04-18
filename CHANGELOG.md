@@ -2,6 +2,61 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.0] — 2026-04-18
+
+**Team tier features + integration test suite.** Phase 3 CRDT genome sync, Phase 4 policy packs + audit log, end-to-end integration suite.
+
+### Added
+
+- **Phase 3: CRDT genome sync** (`server/src/routes/genome.ts`, 275 LOC + plugin-side client at `servers/_genome-sync.ts`, 210 LOC).
+  - Six endpoints: `/genome/init`, `/push`, `/pull?since=N`, `/conflicts`, `/resolve`, `DELETE`.
+  - Vector-clock-based LWW CRDT at section granularity. Concurrent edits → conflict pair with both variants; stale writes detected.
+  - Opt-in via `ASHLR_TEAM_GENOME_ID` env var. Non-blocking, never breaks a session.
+  - 15 server tests + 6 client tests.
+  - Deferred: client-side encryption (v2), full CLI conflict resolver, manifest LWW sync.
+
+- **Phase 4: Policy packs + audit log** (`server/src/routes/policy.ts` + `server/src/routes/audit.ts`).
+  - Policy packs: admin uploads YAML rules (allow/deny/requireConfirm). Versioned with rollback. Precedence: deny > requireConfirm > allow. `hooks/policy-enforce.ts` applies locally with 5-min cache.
+  - Audit log: every non-read tool call logged server-side. Paths fingerprinted (SHA-256), content never stored. Query with filters + NDJSON export.
+  - `hooks/audit-upload.ts` fires PostToolUse. Fire-and-forget with 3s timeout.
+  - 8 policy tests + 8 audit tests + 6 client tests.
+
+- **End-to-end integration suite** at `integration/` (standalone workspace, 305-LOC harness). 10 tests:
+  1. read flow — compression + stats
+  2. multi-edit atomic rollback
+  3. cloud-sync round trip
+  4. cloud LLM summarizer via stub
+  5. permissions install idempotency
+  6. status-line freshness under load
+  7. genome live-refresh after edit
+  8. billing tier transitions on webhook
+  9. magic-link auth happy path
+  10. cross-session isolation
+  - New CI job `integration` after `test` with 10-min ceiling.
+
+- **`docs/policy-packs.md`** — rule syntax, YAML examples, precedence table, rollback flow.
+- **`docs/team-genome.md`** extended with sync flow, conflict resolution, security model.
+- **`minimatch`** dependency added for hook glob matching.
+
+### Fixed
+
+- Bun-type narrow casts in `__tests__/genome-sync.test.ts` (`globalThis.fetch = ... as unknown as typeof fetch`).
+- `hooks/audit-upload.ts` and `hooks/policy-enforce.ts` marked as modules (`export {}`) for top-level await.
+- Root `test` script scoped to `__tests__/` so integration tests don't run without their harness.
+
+### Tests
+
+- **820 pass, 2 skip, 0 fail** (root, `__tests__/` scope).
+- **94 pass** (server, +16 for policy/audit/genome Phase 3).
+- **10 integration tests** in `integration/tests/` (run separately: `cd integration && bun test` with backend live).
+
+### Deps
+
+- root: `minimatch` (hook matching).
+- server: (unchanged — already had what it needed).
+- integration: zero external deps (by design).
+
+
 ## [1.5.0] — 2026-04-18
 
 **VS Code extension, backend observability, launch content kit.** The plugin expands to a new host, the backend gets real eyes on errors and metrics, and every piece of launch-day copy is written.

@@ -1,0 +1,15 @@
+{
+  "name": "ashlr-plugin-integration",
+  "version": "0.0.1",
+  "description": "End-to-end integration tests for ashlr-plugin.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test --timeout 30000",
+    "test:one": "bun test --timeout 30000 --testPathPattern"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

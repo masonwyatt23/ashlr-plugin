@@ -12,6 +12,15 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Edit|Write|Bash|MultiEdit|mcp__ashlr-efficiency__ashlr__edit|mcp__ashlr-multi-edit__*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run ${CLAUDE_PLUGIN_ROOT}/hooks/policy-enforce.ts"
+          }
+        ]
+      },
+      {
         "matcher": "Read",
         "hooks": [
           {
@@ -58,6 +67,15 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write|Bash|mcp__ashlr-efficiency__ashlr__edit|mcp__ashlr-multi-edit__*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run ${CLAUDE_PLUGIN_ROOT}/hooks/audit-upload.ts"
+          }
+        ]
+      },
       {
         "matcher": "Edit|mcp__ashlr-efficiency__ashlr__edit",
         "hooks": [

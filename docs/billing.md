@@ -140,3 +140,42 @@ Three tables support billing:
 
 The `users` table has a `tier` column (`free` | `pro` | `team`) that is the
 single source of truth for access control checks at request time.
+
+## Audit log and policy packs (team tier)
+
+Both features require the **team** tier or higher. Free and Pro users receive
+HTTP 403 if they attempt to call these endpoints.
+
+### Policy packs
+
+Team admins can upload YAML/JSON allow-deny-confirm rule sets via
+`POST /policy/upload`. The server stores each upload as an immutable versioned
+snapshot. Members fetch the current pack via `GET /policy/current` (cached
+5 minutes via ETag). Admins can roll back to any prior version via
+`POST /policy/rollback`. See `docs/policy-packs.md` for rule syntax and
+examples.
+
+Only users with `org_role = "admin"` can upload or roll back. Members can
+read the current pack. Free and Pro users are rejected at the tier gate before
+org-role checks run.
+
+### Audit log
+
+The `POST /audit/event` endpoint accepts tool-call events from the
+`audit-upload` hook. Events are written to `audit_events` in an append-only
+fashion — no updates or deletes are issued outside of explicit admin purges.
+
+Paths and cwds in event arguments are replaced with a 16-char SHA-256
+fingerprint before storage. File contents are never stored. This satisfies
+GDPR path-data minimisation while preserving correlation for compliance audits.
+
+Org admins can query events with filters (`GET /audit/events`) or export the
+full log as NDJSON (`GET /audit/export`). Non-admin members are blocked at the
+org-role gate with 403.
+
+### Database tables (Phase 4)
+
+- **`policy_packs`** — immutable versioned snapshots; unique on `(org_id, name, version)`.
+- **`policy_current`** — one row per org; points to the active pack.
+- **`audit_events`** — append-only event log; indexed by `(org_id, at)` and `(user_id, at)`.
+- **`users.org_id`** / **`users.org_role`** — org membership and role columns added in Phase 4 migration.

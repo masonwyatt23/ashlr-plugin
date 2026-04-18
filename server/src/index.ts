@@ -8,6 +8,7 @@
  *   - Stats agg:       GET  /stats/aggregate
  *   - LLM summarize:   POST /llm/summarize
  *   - Billing:         POST /billing/checkout, GET /billing/portal, etc.
+ *   - Genome sync:     POST /genome/init, POST|GET /genome/:id/push|pull|conflicts|resolve, DELETE /genome/:id
  *   - Health (legacy): GET  /
  *   - Liveness:        GET  /healthz
  *   - Readiness:       GET  /readyz
@@ -23,7 +24,10 @@ import badgeRouter   from "./routes/badge.js";
 import statsRouter   from "./routes/stats.js";
 import llmRouter     from "./routes/llm.js";
 import billingRouter from "./routes/billing.js";
+import genomeRouter  from "./routes/genome.js";
 import authRouter    from "./routes/auth.js";
+import policyRouter  from "./routes/policy.js";
+import auditRouter   from "./routes/audit.js";
 
 import { initSentry, sentryErrorHandler } from "./lib/sentry.js";
 import { httpLogger, logger } from "./lib/logger.js";
@@ -122,6 +126,9 @@ app.route("/", badgeRouter);
 app.route("/", statsRouter);
 app.route("/", llmRouter);
 app.route("/", billingRouter);
+app.route("/", genomeRouter);
+app.route("/", policyRouter);
+app.route("/", auditRouter);
 
 // 404 fallback
 app.notFound((c) => c.json({ error: "Not found" }, 404));

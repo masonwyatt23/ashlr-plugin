@@ -265,3 +265,127 @@ make genome-sync
   genome's architecture section.
 - `/ashlr-genome-init` skill — interactive setup wizard that runs propose +
   consolidate and writes the initial genome.
+
+---
+
+## Backend-hosted genome sync (Pro team tier)
+
+Teams on the `team` plan can host the authoritative genome on the ashlr backend
+instead of (or alongside) the git-committed copy. Every developer pulls the
+latest sections at session start and pushes their edits back automatically.
+
+### How to opt in
+
+1. Obtain a `ASHLR_PRO_TOKEN` for your org (set in the team billing dashboard).
+2. Create a hosted genome:
+   ```bash
+   curl -X POST https://api.ashlr.ai/genome/init \
+     -H "Authorization: Bearer $ASHLR_PRO_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"orgId":"your-org","repoUrl":"https://github.com/your-org/repo"}'
+   # → {"genomeId":"...","cloneToken":"gclone_..."}
+   ```
+3. Export the genome ID in every developer's shell profile or `.env`:
+   ```bash
+   export ASHLR_TEAM_GENOME_ID=<genomeId>
+   export ASHLR_PRO_TOKEN=<token>
+   ```
+
+From that point on, `session-start.ts` pulls updates automatically and
+`_genome-live.ts` pushes section changes after each `ashlr__edit`.
+
+### Sync flow
+
+```
+Session start
+  └─ GET /genome/:id/pull?since=<localSeq>
+       └─ returns sections modified since last pull
+       └─ writes each section to .ashlrcode/genome/sections/<name>.md
+       └─ persists new serverSeqNum to ~/.ashlr/genome-seq.json
+
+After ashlr__edit on a genome section
+  └─ POST /genome/:id/push { sections:[{path,content,vclock}], clientId }
+       └─ server merges vclocks, detects conflicts
+       └─ responds { applied:[paths], conflicts:[paths] }
+```
+
+### Vector-clock merge algorithm
+
+Each section carries a vector clock `{ [clientId]: count }`.
+
+```
+mergeVClocks(a, b)  →  component-wise max of every key in a ∪ b
+
+compareVClocks(incoming, stored):
+  if incoming[k] >= stored[k] for all k  →  "dominates"  (safe update)
+  if stored[k] >  incoming[k] for any k
+     and incoming[k] < stored[k] for any k  →  "concurrent"  (conflict)
+  if stored[k] > incoming[k] for all k  →  "dominated"  (stale push)
+```
+
+Push semantics by relation:
+- **dominates** — section updated, any prior conflict cleared.
+- **concurrent** — both variants stored; conflict surfaced via `GET /conflicts`.
+- **dominated** — incoming is stale; stored value kept, conflict recorded so
+  neither version is lost.
+
+### Conflict example
+
+Developer A and B both edit `sections/auth.md` from the same base:
+
+| Event | Client | vclock stored | vclock incoming | Result |
+|-------|--------|---------------|-----------------|--------|
+| Push A | `ca`  | `{}`          | `{ca:1}`        | applied, stored = `{ca:1}` |
+| Push B | `cb`  | `{ca:1}`      | `{cb:1}`        | concurrent — conflict recorded |
+
+B's push has `cb:1` (new to server) but is missing `ca:1` (server has it). Neither
+dominates. Both variants are stored and `GET /genome/:id/conflicts` returns them
+with an `authorHint` so the team can choose the winner via
+`POST /genome/:id/resolve`.
+
+### Conflict resolution
+
+```bash
+# List conflicts
+curl https://api.ashlr.ai/genome/$GENOME_ID/conflicts \
+  -H "Authorization: Bearer $ASHLR_PRO_TOKEN"
+
+# Resolve — pick the winning content
+curl -X POST https://api.ashlr.ai/genome/$GENOME_ID/resolve \
+  -H "Authorization: Bearer $ASHLR_PRO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"sections/auth.md","winning":{"content":"...","vclock":{"ca":1,"cb":1}}}'
+```
+
+The `/ashlr-genome-conflicts` skill shows unresolved conflicts with a short diff
+view inside Claude Code. A full CLI resolver is planned for v2.
+
+### Private vs shared genome trade-offs
+
+| | Git-committed genome | Backend-hosted genome |
+|--|----------------------|-----------------------|
+| Conflict resolution | Manual merge / PR | CRDT auto-merge |
+| Latency to teammates | Next `git pull` | Next session start (~instant) |
+| Offline support | Full | Pull/push silently skipped |
+| Visibility | Full git history | Push audit log only |
+| Setup complexity | None | Requires `ASHLR_TEAM_GENOME_ID` |
+
+For small teams with short PR cycles, the git-committed genome is usually
+sufficient. The hosted sync shines when multiple developers are in active Claude
+Code sessions simultaneously on the same repo.
+
+### Security
+
+**Content is stored in plaintext on the ashlr backend.**
+
+- All requests are authenticated with a bearer token (`ASHLR_PRO_TOKEN`).
+- Section paths are sanitized server-side: `..`, absolute paths, and `//`
+  patterns are rejected with HTTP 400.
+- Content is capped at 1 MB per section.
+- Push calls are rate-limited to 10 sections per minute per client.
+- Every push is written to an audit log (`genome_push_log`) for Phase 4 audit
+  trail integration.
+- **Client-side encryption is deferred to v2.** Teams should opt in knowing that
+  genome section content (code summaries, architecture notes) is readable by
+  ashlr infrastructure. Do not store secrets in genome sections.
+

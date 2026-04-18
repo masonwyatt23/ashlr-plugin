@@ -130,4 +130,43 @@ jobs:
             Review the aggregate numbers in `docs/benchmarks-v2.json` before merging.
           add-paths: docs/benchmarks-v2.json
 
-
+  # ---------------------------------------------------------------------------
+  # integration: end-to-end tests — runs after unit tests pass.
+  # ---------------------------------------------------------------------------
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      - name: Cache root node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - name: Cache server node_modules
+        uses: actions/cache@v4
+        with:
+          path: server/node_modules
+          key: bun-server-${{ hashFiles('server/bun.lock') }}
+      - name: Cache integration node_modules
+        uses: actions/cache@v4
+        with:
+          path: integration/node_modules
+          key: bun-integration-${{ hashFiles('integration/package.json') }}
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+      - name: Install root deps
+        run: bun install
+      - name: Install server deps
+        run: cd server && bun install
+      - name: Install integration deps
+        run: cd integration && bun install
+      - name: Run integration tests
+        run: cd integration && bun test --timeout 30000
+        env:
+          TESTING: "1"
+          ASHLR_DISABLE_CLOUD_LLM: "1"

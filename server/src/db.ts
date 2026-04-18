@@ -49,6 +49,12 @@ function addTierColumnIfMissing(db: Database): void {
   if (!cols.some((c) => c.name === "tier")) {
     db.exec(`ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'`);
   }
+  if (!cols.some((c) => c.name === "org_id")) {
+    db.exec(`ALTER TABLE users ADD COLUMN org_id TEXT`);
+  }
+  if (!cols.some((c) => c.name === "org_role")) {
+    db.exec(`ALTER TABLE users ADD COLUMN org_role TEXT`);
+  }
 }
 
 function runMigrations(db: Database): void {
@@ -144,6 +150,85 @@ function runMigrations(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_magic_tokens_email ON magic_tokens(email);
+
+    -- Phase 3 (genome): team CRDT genome sync
+    CREATE TABLE IF NOT EXISTS genomes (
+      id         TEXT PRIMARY KEY,
+      org_id     TEXT NOT NULL,
+      repo_url   TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+      server_seq INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(org_id, repo_url)
+    );
+
+    CREATE TABLE IF NOT EXISTS genome_sections (
+      id            TEXT PRIMARY KEY,
+      genome_id     TEXT NOT NULL REFERENCES genomes(id) ON DELETE CASCADE,
+      path          TEXT NOT NULL,
+      content       TEXT NOT NULL DEFAULT '',
+      vclock_json   TEXT NOT NULL DEFAULT '{}',
+      conflict_flag INTEGER NOT NULL DEFAULT 0,
+      server_seq    INTEGER NOT NULL DEFAULT 0,
+      updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+      UNIQUE(genome_id, path)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_genome_sections_genome_seq ON genome_sections(genome_id, server_seq);
+
+    CREATE TABLE IF NOT EXISTS genome_conflicts (
+      id           TEXT PRIMARY KEY,
+      genome_id    TEXT NOT NULL REFERENCES genomes(id) ON DELETE CASCADE,
+      path         TEXT NOT NULL,
+      variants_json TEXT NOT NULL DEFAULT '[]',
+      detected_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_genome_conflicts_genome ON genome_conflicts(genome_id);
+
+    CREATE TABLE IF NOT EXISTS genome_push_log (
+      id         TEXT PRIMARY KEY,
+      genome_id  TEXT NOT NULL,
+      client_id  TEXT NOT NULL,
+      path       TEXT NOT NULL,
+      at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_genome_push_log_genome ON genome_push_log(genome_id, at);
+
+    -- Phase 4: Policy packs
+    CREATE TABLE IF NOT EXISTS policy_packs (
+      id         TEXT PRIMARY KEY,
+      org_id     TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      version    INTEGER NOT NULL DEFAULT 1,
+      rules_json TEXT NOT NULL DEFAULT '{"allow":[],"deny":[],"requireConfirm":[]}',
+      author     TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+      UNIQUE (org_id, name, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS policy_current (
+      org_id  TEXT PRIMARY KEY,
+      pack_id TEXT NOT NULL,
+      set_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_policy_packs_org ON policy_packs(org_id);
+
+    -- Phase 4: Audit log (append-only; no UPDATE/DELETE except admin purge)
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id              TEXT PRIMARY KEY,
+      org_id          TEXT NOT NULL,
+      user_id         TEXT NOT NULL,
+      tool            TEXT NOT NULL,
+      args_json       TEXT NOT NULL DEFAULT '{}',
+      cwd_fingerprint TEXT NOT NULL DEFAULT '',
+      git_commit      TEXT NOT NULL DEFAULT '',
+      at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_events_org_at   ON audit_events(org_id, at);
+    CREATE INDEX IF NOT EXISTS idx_audit_events_user_at  ON audit_events(user_id, at);
   `);
 }
 
@@ -156,7 +241,9 @@ export interface User {
   email: string;
   api_token: string;
   created_at: string;
-  tier: string; // "free" | "pro" | "team"
+  tier: string;     // "free" | "pro" | "team"
+  org_id: string | null;
+  org_role: string | null; // "admin" | "member" | null
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +324,7 @@ export function createUser(email: string, apiToken: string): User {
 export function getUserById(id: string): User | null {
   const db = getDb();
   return db.query<User, [string]>(
-    `SELECT id, email, api_token, created_at, tier FROM users WHERE id = ?`,
+    `SELECT id, email, api_token, created_at, tier, org_id, org_role FROM users WHERE id = ?`,
   ).get(id);
 }
 
@@ -577,7 +664,7 @@ export function countRecentMagicTokens(email: string, windowMs: number): number 
 export function getOrCreateUserByEmail(email: string): User {
   const db = getDb();
   const existing = db.query<User, [string]>(
-    `SELECT id, email, api_token, created_at, tier FROM users WHERE email = ?`,
+    `SELECT id, email, api_token, created_at, tier, org_id, org_role FROM users WHERE email = ?`,
   ).get(email);
   if (existing) return existing;
   // Placeholder api_token — will be replaced when they verify the magic link.
@@ -595,4 +682,334 @@ export function issueApiToken(userId: string): string {
     [token, userId],
   );
   return token;
+}
+
+// ---------------------------------------------------------------------------
+// Genome helpers (Phase 3 — team CRDT genome sync)
+// ---------------------------------------------------------------------------
+
+export interface Genome {
+  id: string;
+  org_id: string;
+  repo_url: string;
+  created_at: string;
+  server_seq: number;
+}
+
+export interface GenomeSection {
+  id: string;
+  genome_id: string;
+  path: string;
+  content: string;
+  vclock_json: string;
+  conflict_flag: number;
+  server_seq: number;
+  updated_at: string;
+}
+
+export interface GenomeConflict {
+  id: string;
+  genome_id: string;
+  path: string;
+  variants_json: string;
+  detected_at: string;
+}
+
+/** Create or return an existing genome for (orgId, repoUrl). Returns {genome, created}. */
+export function upsertGenome(orgId: string, repoUrl: string): { genome: Genome; created: boolean } {
+  const db = getDb();
+  const existing = db.query<Genome, [string, string]>(
+    `SELECT id, org_id, repo_url, created_at, server_seq FROM genomes WHERE org_id = ? AND repo_url = ?`,
+  ).get(orgId, repoUrl);
+  if (existing) return { genome: existing, created: false };
+
+  const id = crypto.randomUUID();
+  db.run(`INSERT INTO genomes (id, org_id, repo_url) VALUES (?, ?, ?)`, [id, orgId, repoUrl]);
+  return { genome: db.query<Genome, [string]>(`SELECT * FROM genomes WHERE id = ?`).get(id)!, created: true };
+}
+
+export function getGenomeById(id: string): Genome | null {
+  return getDb().query<Genome, [string]>(`SELECT * FROM genomes WHERE id = ?`).get(id);
+}
+
+export function deleteGenome(id: string): void {
+  getDb().run(`DELETE FROM genomes WHERE id = ?`, [id]);
+}
+
+/** Atomically bump server_seq on genome and return the new value. */
+export function bumpGenomeSeq(genomeId: string): number {
+  const db = getDb();
+  db.run(`UPDATE genomes SET server_seq = server_seq + 1 WHERE id = ?`, [genomeId]);
+  const row = db.query<{ server_seq: number }, [string]>(
+    `SELECT server_seq FROM genomes WHERE id = ?`,
+  ).get(genomeId);
+  return row!.server_seq;
+}
+
+/** Upsert a genome section. Returns {section, wasConflict}. */
+export function upsertGenomeSection(
+  genomeId: string,
+  path: string,
+  content: string,
+  vclockJson: string,
+  conflictFlag: boolean,
+  serverSeq: number,
+): GenomeSection {
+  const db = getDb();
+  const existing = db.query<GenomeSection, [string, string]>(
+    `SELECT * FROM genome_sections WHERE genome_id = ? AND path = ?`,
+  ).get(genomeId, path);
+
+  if (existing) {
+    db.run(
+      `UPDATE genome_sections SET content = ?, vclock_json = ?, conflict_flag = ?, server_seq = ?,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+       WHERE genome_id = ? AND path = ?`,
+      [content, vclockJson, conflictFlag ? 1 : 0, serverSeq, genomeId, path],
+    );
+  } else {
+    const id = crypto.randomUUID();
+    db.run(
+      `INSERT INTO genome_sections (id, genome_id, path, content, vclock_json, conflict_flag, server_seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, genomeId, path, content, vclockJson, conflictFlag ? 1 : 0, serverSeq],
+    );
+  }
+
+  return db.query<GenomeSection, [string, string]>(
+    `SELECT * FROM genome_sections WHERE genome_id = ? AND path = ?`,
+  ).get(genomeId, path)!;
+}
+
+export function getGenomeSectionsSince(genomeId: string, since: number): GenomeSection[] {
+  return getDb().query<GenomeSection, [string, number]>(
+    `SELECT * FROM genome_sections WHERE genome_id = ? AND server_seq > ? ORDER BY server_seq ASC`,
+  ).all(genomeId, since);
+}
+
+export function getGenomeSectionByPath(genomeId: string, path: string): GenomeSection | null {
+  return getDb().query<GenomeSection, [string, string]>(
+    `SELECT * FROM genome_sections WHERE genome_id = ? AND path = ?`,
+  ).get(genomeId, path);
+}
+
+/** Insert or replace a conflict record for a path (one active conflict per path). */
+export function upsertGenomeConflict(
+  genomeId: string,
+  path: string,
+  variantsJson: string,
+): void {
+  const db = getDb();
+  // Remove any existing conflict for this path first
+  db.run(`DELETE FROM genome_conflicts WHERE genome_id = ? AND path = ?`, [genomeId, path]);
+  db.run(
+    `INSERT INTO genome_conflicts (id, genome_id, path, variants_json)
+     VALUES (?, ?, ?, ?)`,
+    [crypto.randomUUID(), genomeId, path, variantsJson],
+  );
+}
+
+export function getGenomeConflicts(genomeId: string): GenomeConflict[] {
+  return getDb().query<GenomeConflict, [string]>(
+    `SELECT * FROM genome_conflicts WHERE genome_id = ? ORDER BY detected_at DESC`,
+  ).all(genomeId);
+}
+
+export function resolveGenomeConflict(genomeId: string, path: string): void {
+  getDb().run(
+    `DELETE FROM genome_conflicts WHERE genome_id = ? AND path = ?`,
+    [genomeId, path],
+  );
+}
+
+export function logGenomePush(genomeId: string, clientId: string, path: string): void {
+  getDb().run(
+    `INSERT INTO genome_push_log (id, genome_id, client_id, path) VALUES (?, ?, ?, ?)`,
+    [crypto.randomUUID(), genomeId, clientId, path],
+  );
+}
+
+/** Count push events for a clientId within the last windowMs milliseconds. */
+export function countRecentGenomePushes(genomeId: string, clientId: string, windowMs: number): number {
+  const since = new Date(Date.now() - windowMs).toISOString();
+  const row = getDb().query<{ n: number }, [string, string, string]>(
+    `SELECT COUNT(*) AS n FROM genome_push_log WHERE genome_id = ? AND client_id = ? AND at >= ?`,
+  ).get(genomeId, clientId, since);
+  return row?.n ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Policy pack helpers (Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface PolicyRule {
+  match: string;
+  kind: "tool" | "path" | "shell";
+  reason?: string;
+}
+
+export interface PolicyRules {
+  allow: PolicyRule[];
+  deny: PolicyRule[];
+  requireConfirm: PolicyRule[];
+}
+
+export interface PolicyPack {
+  id: string;
+  org_id: string;
+  name: string;
+  version: number;
+  rules_json: string;
+  author: string;
+  created_at: string;
+}
+
+export interface PolicyCurrent {
+  org_id: string;
+  pack_id: string;
+  set_at: string;
+}
+
+/** Insert a new policy pack version. Returns the new pack. */
+export function createPolicyPack(
+  orgId: string,
+  name: string,
+  rules: PolicyRules,
+  author: string,
+): PolicyPack {
+  const db = getDb();
+  // Determine next version number for this (org, name) pair.
+  const row = db.query<{ max_v: number | null }, [string, string]>(
+    `SELECT MAX(version) AS max_v FROM policy_packs WHERE org_id = ? AND name = ?`,
+  ).get(orgId, name);
+  const version = (row?.max_v ?? 0) + 1;
+  const id = crypto.randomUUID();
+  db.run(
+    `INSERT INTO policy_packs (id, org_id, name, version, rules_json, author)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, orgId, name, version, JSON.stringify(rules), author],
+  );
+  // Update current pointer
+  db.run(
+    `INSERT INTO policy_current (org_id, pack_id, set_at)
+     VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+     ON CONFLICT(org_id) DO UPDATE SET pack_id = excluded.pack_id, set_at = excluded.set_at`,
+    [orgId, id],
+  );
+  return getPolicyPackById(id)!;
+}
+
+export function getPolicyPackById(id: string): PolicyPack | null {
+  return getDb()
+    .query<PolicyPack, [string]>(`SELECT * FROM policy_packs WHERE id = ?`)
+    .get(id);
+}
+
+export function getCurrentPolicyPack(orgId: string): PolicyPack | null {
+  const db = getDb();
+  const cur = db.query<PolicyCurrent, [string]>(
+    `SELECT * FROM policy_current WHERE org_id = ?`,
+  ).get(orgId);
+  if (!cur) return null;
+  return getPolicyPackById(cur.pack_id);
+}
+
+export function getPolicyPackHistory(orgId: string, limit = 20): PolicyPack[] {
+  return getDb()
+    .query<PolicyPack, [string, number]>(
+      `SELECT * FROM policy_packs WHERE org_id = ? ORDER BY version DESC LIMIT ?`,
+    )
+    .all(orgId, limit);
+}
+
+export function getPolicyPackByVersion(orgId: string, name: string, version: number): PolicyPack | null {
+  return getDb()
+    .query<PolicyPack, [string, string, number]>(
+      `SELECT * FROM policy_packs WHERE org_id = ? AND name = ? AND version = ?`,
+    )
+    .get(orgId, name, version);
+}
+
+/** Set a specific pack as the current one (for rollback). */
+export function setCurrentPolicyPack(orgId: string, packId: string): void {
+  getDb().run(
+    `INSERT INTO policy_current (org_id, pack_id, set_at)
+     VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+     ON CONFLICT(org_id) DO UPDATE SET pack_id = excluded.pack_id, set_at = excluded.set_at`,
+    [orgId, packId],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit event helpers (Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface AuditEvent {
+  id: string;
+  org_id: string;
+  user_id: string;
+  tool: string;
+  args_json: string;
+  cwd_fingerprint: string;
+  git_commit: string;
+  at: string;
+}
+
+export interface AppendAuditEventParams {
+  orgId: string;
+  userId: string;
+  tool: string;
+  argsJson: string;
+  cwdFingerprint: string;
+  gitCommit: string;
+  at?: string;
+}
+
+/** Append an immutable audit event. Returns the event id. */
+export function appendAuditEvent(params: AppendAuditEventParams): string {
+  const id = crypto.randomUUID();
+  const at = params.at ?? new Date().toISOString();
+  getDb().run(
+    `INSERT INTO audit_events (id, org_id, user_id, tool, args_json, cwd_fingerprint, git_commit, at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, params.orgId, params.userId, params.tool, params.argsJson, params.cwdFingerprint, params.gitCommit, at],
+  );
+  return id;
+}
+
+export interface QueryAuditEventsParams {
+  orgId: string;
+  from?: string;
+  to?: string;
+  userId?: string;
+  tool?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function queryAuditEvents(params: QueryAuditEventsParams): AuditEvent[] {
+  const db = getDb();
+  const conditions: string[] = ["org_id = ?"];
+  const bindings: unknown[] = [params.orgId];
+
+  if (params.from) { conditions.push("at >= ?"); bindings.push(params.from); }
+  if (params.to)   { conditions.push("at <= ?"); bindings.push(params.to); }
+  if (params.userId) { conditions.push("user_id = ?"); bindings.push(params.userId); }
+  if (params.tool)   { conditions.push("tool = ?"); bindings.push(params.tool); }
+
+  const limit  = params.limit  ?? 100;
+  const offset = params.offset ?? 0;
+  bindings.push(limit, offset);
+
+  const sql = `SELECT * FROM audit_events WHERE ${conditions.join(" AND ")} ORDER BY at DESC LIMIT ? OFFSET ?`;
+  return db.query<AuditEvent, unknown[]>(sql).all(...bindings);
+}
+
+/** Stream all audit events for an org in ascending time order (for NDJSON export). */
+export function streamAuditEvents(orgId: string): AuditEvent[] {
+  return getDb()
+    .query<AuditEvent, [string]>(
+      `SELECT * FROM audit_events WHERE org_id = ? ORDER BY at ASC`,
+    )
+    .all(orgId);
 }
