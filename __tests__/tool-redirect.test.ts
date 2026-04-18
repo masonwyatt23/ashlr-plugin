@@ -56,14 +56,18 @@ describe("tool-redirect · decide()", () => {
     expect(out.hookSpecificOutput.additionalContext).toBeUndefined();
   });
 
-  test("Read on a large (>2KB) file nudges toward ashlr__read", async () => {
+  test("Read on a large (>2KB) file silently nudges toward ashlr__read", async () => {
+    // Silent nudge contract: additionalContext is set so the agent learns
+    // about ashlr__read, but permissionDecision is NEVER set — setting it
+    // to "ask" would force a prompt even in bypassPermissions mode (Claude
+    // Code docs: ask rules are evaluated regardless of mode).
     const path = join(tmp, "huge.txt");
     await writeFile(path, "x".repeat(5000));
     const out = decide(
       { tool_name: "Read", tool_input: { file_path: path } },
       { home: fakeHome },
     );
-    expect(out.hookSpecificOutput.permissionDecision).toBe("ask");
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
     expect(out.hookSpecificOutput.additionalContext).toContain("ashlr__read");
     expect(out.hookSpecificOutput.additionalContext).toContain(path);
   });
@@ -81,7 +85,7 @@ describe("tool-redirect · decide()", () => {
       { tool_name: "Grep", tool_input: { pattern: "foo.*bar" } },
       { home: fakeHome },
     );
-    expect(out.hookSpecificOutput.permissionDecision).toBe("ask");
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
     expect(out.hookSpecificOutput.additionalContext).toContain("ashlr__grep");
     expect(out.hookSpecificOutput.additionalContext).toContain("foo.*bar");
   });
@@ -91,7 +95,7 @@ describe("tool-redirect · decide()", () => {
       { tool_name: "Edit", tool_input: { file_path: "/x/y.ts" } },
       { home: fakeHome },
     );
-    expect(out.hookSpecificOutput.permissionDecision).toBe("ask");
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
     expect(out.hookSpecificOutput.additionalContext).toContain("ashlr__edit");
     expect(out.hookSpecificOutput.additionalContext).toContain("/x/y.ts");
   });
@@ -154,7 +158,7 @@ describe("tool-redirect · stdin/stdout end-to-end", () => {
     const out = await runHook(
       JSON.stringify({ tool_name: "Grep", tool_input: { pattern: "needle" } }),
     );
-    expect(out.hookSpecificOutput.permissionDecision).toBe("ask");
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
     expect(out.hookSpecificOutput.additionalContext).toContain("ashlr__grep");
   });
 });

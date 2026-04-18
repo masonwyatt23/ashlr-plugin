@@ -18,6 +18,7 @@ import {
   probeServer,
   resolvePluginRoot,
   fetchLatestRelease,
+  hasAshlrAllowEntry,
   type ProbeResult,
 } from "../scripts/doctor.ts";
 
@@ -298,6 +299,119 @@ describe("buildReport", () => {
     const warns = hooks.lines.filter((l) => l.status === "warn");
     expect(warns.length).toBeGreaterThanOrEqual(4);
     expect(warns[0]!.fix).toContain("chmod +x");
+  });
+});
+
+describe("hasAshlrAllowEntry", () => {
+  test("returns false for missing/null/non-array", () => {
+    expect(hasAshlrAllowEntry(undefined)).toBe(false);
+    expect(hasAshlrAllowEntry(null)).toBe(false);
+    expect(hasAshlrAllowEntry("mcp__ashlr-*")).toBe(false);
+    expect(hasAshlrAllowEntry({})).toBe(false);
+  });
+  test("returns true when catch-all is present", () => {
+    expect(hasAshlrAllowEntry(["mcp__ashlr-*"])).toBe(true);
+  });
+  test("returns true when per-server wildcard is present", () => {
+    expect(hasAshlrAllowEntry(["mcp__ashlr-efficiency__*"])).toBe(true);
+    expect(hasAshlrAllowEntry(["Bash(git diff:*)", "mcp__ashlr-bash__*"])).toBe(true);
+  });
+  test("returns false when only unrelated entries present", () => {
+    expect(hasAshlrAllowEntry(["Bash(npm run test:*)", "mcp__webfetch__fetch"])).toBe(false);
+  });
+});
+
+describe("buildReport — allowlist check", () => {
+  test("fails (red) when permissions.allow has no ashlr entry", async () => {
+    const root = await scratchHome();
+    await writePluginSkeleton(root);
+    const home = await scratchHome();
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(
+      join(home, ".claude/settings.json"),
+      JSON.stringify({ permissions: { allow: ["Bash(git diff:*)"] } }),
+    );
+    const report = await buildReport({
+      root,
+      home,
+      cwd: home,
+      fetchLatest: async () => "0.4.0",
+      probe: fakeSuccessfulProbe,
+      bunVersion: async () => "1.3.10",
+    });
+    const line = report.sections
+      .find((s) => s.title === "runtime state")!
+      .lines.find((l) => l.label === "allowlist")!;
+    expect(line.status).toBe("fail");
+    expect(line.detail).toContain("not in allowlist");
+    expect(line.fix).toContain("/ashlr-allow");
+  });
+
+  test("ok (green) when catch-all is present", async () => {
+    const root = await scratchHome();
+    await writePluginSkeleton(root);
+    const home = await scratchHome();
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(
+      join(home, ".claude/settings.json"),
+      JSON.stringify({ permissions: { allow: ["mcp__ashlr-*"] } }),
+    );
+    const report = await buildReport({
+      root,
+      home,
+      cwd: home,
+      fetchLatest: async () => "0.4.0",
+      probe: fakeSuccessfulProbe,
+      bunVersion: async () => "1.3.10",
+    });
+    const line = report.sections
+      .find((s) => s.title === "runtime state")!
+      .lines.find((l) => l.label === "allowlist")!;
+    expect(line.status).toBe("ok");
+    expect(line.detail).toContain("pre-approved");
+  });
+
+  test("ok (green) when per-server wildcard is present", async () => {
+    const root = await scratchHome();
+    await writePluginSkeleton(root);
+    const home = await scratchHome();
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(
+      join(home, ".claude/settings.json"),
+      JSON.stringify({ permissions: { allow: ["mcp__ashlr-efficiency__*", "mcp__ashlr-bash__*"] } }),
+    );
+    const report = await buildReport({
+      root,
+      home,
+      cwd: home,
+      fetchLatest: async () => "0.4.0",
+      probe: fakeSuccessfulProbe,
+      bunVersion: async () => "1.3.10",
+    });
+    const line = report.sections
+      .find((s) => s.title === "runtime state")!
+      .lines.find((l) => l.label === "allowlist")!;
+    expect(line.status).toBe("ok");
+  });
+
+  test("fails (red) when settings.json is missing", async () => {
+    const root = await scratchHome();
+    await writePluginSkeleton(root);
+    const home = await scratchHome();
+    // No settings.json written
+    const report = await buildReport({
+      root,
+      home,
+      cwd: home,
+      fetchLatest: async () => "0.4.0",
+      probe: fakeSuccessfulProbe,
+      bunVersion: async () => "1.3.10",
+    });
+    const line = report.sections
+      .find((s) => s.title === "runtime state")!
+      .lines.find((l) => l.label === "allowlist")!;
+    expect(line.status).toBe("fail");
+    expect(line.fix).toContain("/ashlr-allow");
   });
 });
 

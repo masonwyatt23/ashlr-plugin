@@ -19,77 +19,15 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "child_process";
-import { existsSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join } from "path";
 
 import { snipCompact } from "@ashlr/core-efficiency/compression";
 import type { Message } from "@ashlr/core-efficiency";
-
-// ---------------------------------------------------------------------------
-// Savings tracker (shared schema with sibling servers)
-// ---------------------------------------------------------------------------
+import { recordSaving as recordSavingCore } from "./_stats";
 
 type ToolName = "ashlr__pr" | "ashlr__issue";
 
-interface PerTool { calls: number; tokensSaved: number }
-interface Stats {
-  session: { calls: number; tokensSaved: number; byTool?: Record<string, PerTool> };
-  lifetime: { calls: number; tokensSaved: number; byTool?: Record<string, PerTool> };
-}
-
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
-const session: Stats["session"] = { calls: 0, tokensSaved: 0, byTool: {} };
-
-async function loadLifetime(): Promise<Stats["lifetime"]> {
-  if (!existsSync(STATS_PATH)) return { calls: 0, tokensSaved: 0, byTool: {} };
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Stats;
-    const lt = raw.lifetime ?? { calls: 0, tokensSaved: 0 };
-    return { calls: lt.calls ?? 0, tokensSaved: lt.tokensSaved ?? 0, byTool: lt.byTool ?? {} };
-  } catch {
-    return { calls: 0, tokensSaved: 0, byTool: {} };
-  }
-}
-
-// Simple mutex to serialize stats writes even if handlers happen to run
-// concurrently (Node/Bun single-threaded, but awaits can interleave).
-let statsChain: Promise<unknown> = Promise.resolve();
-
 async function recordSaving(rawChars: number, compactChars: number, tool: ToolName): Promise<void> {
-  const saved = Math.max(0, Math.ceil((rawChars - compactChars) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  session.byTool = session.byTool ?? {};
-  const st = session.byTool[tool] ?? (session.byTool[tool] = { calls: 0, tokensSaved: 0 });
-  st.calls++;
-  st.tokensSaved += saved;
-
-  statsChain = statsChain.then(async () => {
-    const lifetime = await loadLifetime();
-    lifetime.calls++;
-    lifetime.tokensSaved += saved;
-    lifetime.byTool = lifetime.byTool ?? {};
-    const lt = lifetime.byTool[tool] ?? (lifetime.byTool[tool] = { calls: 0, tokensSaved: 0 });
-    lt.calls++;
-    lt.tokensSaved += saved;
-
-    await mkdir(dirname(STATS_PATH), { recursive: true });
-    // Merge existing on-disk payload so we preserve entries written by
-    // sibling servers (efficiency-server's richer byTool map, etc.).
-    let existing: any = {};
-    if (existsSync(STATS_PATH)) {
-      try { existing = JSON.parse(await readFile(STATS_PATH, "utf-8")); } catch { /* ignore */ }
-    }
-    const payload = {
-      ...existing,
-      session: { ...(existing.session ?? {}), ...session },
-      lifetime: { ...(existing.lifetime ?? {}), ...lifetime },
-    };
-    await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
-  });
-  await statsChain;
+  await recordSavingCore(rawChars, compactChars, tool);
 }
 
 // ---------------------------------------------------------------------------

@@ -17,10 +17,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync } from "fs";
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join, resolve } from "path";
+import { readFile, writeFile } from "fs/promises";
+import { resolve } from "path";
 import { spawnSync } from "child_process";
 
 import { statSync } from "fs";
@@ -30,27 +28,35 @@ import {
   formatGenomeForPrompt,
   genomeExists,
   type Message,
-  retrieveSectionsV2,
   snipCompact,
 } from "@ashlr/core-efficiency";
+import { retrieveCached } from "./_genome-cache";
 
 import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { logEvent } from "./_events";
 import { findParentGenome } from "../scripts/genome-link";
+import { getCalibrationMultiplier } from "../scripts/read-calibration";
+import {
+  readStats,
+  readCurrentSession,
+  recordSaving,
+  type LifetimeBucket,
+  type SessionBucket,
+} from "./_stats";
+import {
+  buildTopProjects,
+  readCalibrationState,
+  renderPerProjectSection,
+  renderBestDaySection,
+  renderCalibrationLine,
+  type ExtraContext,
+} from "../scripts/savings-report-extras";
 
 // ---------------------------------------------------------------------------
-// Savings tracker
+// Pricing (used by the savings display — not by accounting)
 // ---------------------------------------------------------------------------
 
 type ToolName = "ashlr__read" | "ashlr__grep" | "ashlr__edit" | "ashlr__sql" | "ashlr__bash";
-const TOOL_NAMES: ToolName[] = ["ashlr__read", "ashlr__grep", "ashlr__edit", "ashlr__sql", "ashlr__bash"];
-
-interface PerTool { calls: number; tokensSaved: number }
-interface ByTool { [k: string]: PerTool }
-interface ByDay { [date: string]: { calls: number; tokensSaved: number } }
-
-interface SessionStats { startedAt: string; calls: number; tokensSaved: number; byTool: ByTool }
-interface LifetimeStats { calls: number; tokensSaved: number; byTool: ByTool; byDay: ByDay }
-interface Stats { session: SessionStats; lifetime: LifetimeStats }
 
 // Pricing: USD per million tokens. Default sonnet-4.5 input pricing.
 export const PRICING: Record<string, { input: number; output: number }> = {
@@ -65,74 +71,6 @@ function pricingModel(): string {
 function costFor(tokens: number, model = pricingModel()): number {
   const p = PRICING[model] ?? PRICING[PRICING_MODEL_DEFAULT]!;
   return (tokens * p.input) / 1_000_000;
-}
-
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
-
-function emptyByTool(): ByTool {
-  const o: ByTool = {};
-  for (const n of TOOL_NAMES) o[n] = { calls: 0, tokensSaved: 0 };
-  return o;
-}
-
-const session: SessionStats = {
-  startedAt: new Date().toISOString(),
-  calls: 0,
-  tokensSaved: 0,
-  byTool: emptyByTool(),
-};
-
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-/** Read stats.json, migrating legacy flat shapes. Returns lifetime stats. */
-async function loadLifetime(): Promise<LifetimeStats> {
-  const empty: LifetimeStats = { calls: 0, tokensSaved: 0, byTool: emptyByTool(), byDay: {} };
-  if (!existsSync(STATS_PATH)) return empty;
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Partial<Stats> & {
-      lifetime?: Partial<LifetimeStats>;
-    };
-    const life = raw.lifetime;
-    if (!life) return empty;
-    return {
-      calls: typeof life.calls === "number" ? life.calls : 0,
-      tokensSaved: typeof life.tokensSaved === "number" ? life.tokensSaved : 0,
-      byTool: { ...emptyByTool(), ...(life.byTool ?? {}) },
-      byDay: life.byDay ?? {},
-    };
-  } catch {
-    return empty;
-  }
-}
-
-async function persistStats(lifetime: LifetimeStats): Promise<void> {
-  await mkdir(dirname(STATS_PATH), { recursive: true });
-  const payload: Stats = { session, lifetime };
-  await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
-}
-
-async function recordSaving(rawChars: number, compactChars: number, toolName: ToolName): Promise<void> {
-  const saved = Math.max(0, Math.ceil((rawChars - compactChars) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  const st = session.byTool[toolName] ?? (session.byTool[toolName] = { calls: 0, tokensSaved: 0 });
-  st.calls++;
-  st.tokensSaved += saved;
-
-  const lifetime = await loadLifetime();
-  lifetime.calls++;
-  lifetime.tokensSaved += saved;
-  const lt = lifetime.byTool[toolName] ?? (lifetime.byTool[toolName] = { calls: 0, tokensSaved: 0 });
-  lt.calls++;
-  lt.tokensSaved += saved;
-  const day = todayKey();
-  const d = lifetime.byDay[day] ?? (lifetime.byDay[day] = { calls: 0, tokensSaved: 0 });
-  d.calls++;
-  d.tokensSaved += saved;
-
-  await persistStats(lifetime);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +119,7 @@ function lastNDays(n: number): string[] {
   return out;
 }
 
-function renderSavings(lifetime: LifetimeStats): string {
+function renderSavings(session: SessionBucket, lifetime: LifetimeBucket, extra?: ExtraContext): string {
   const model = pricingModel();
   const lines: string[] = [];
   lines.push(`ashlr savings · session started ${formatAge(session.startedAt)} · model ${model}`);
@@ -200,9 +138,10 @@ function renderSavings(lifetime: LifetimeStats): string {
   lines.push(pad(sCost, 25)  + lCost);
   lines.push("");
 
-  // By tool (session)
+  // By tool (session) — iterate whatever tools actually fired this session.
   lines.push("by tool (session):");
-  const entries = TOOL_NAMES.map((n) => ({ name: n, ...(session.byTool[n] ?? { calls: 0, tokensSaved: 0 }) }))
+  const entries = Object.entries(session.byTool)
+    .map(([name, pt]) => ({ name, calls: pt.calls, tokensSaved: pt.tokensSaved }))
     .filter((e) => e.calls > 0 || e.tokensSaved > 0)
     .sort((a, b) => b.tokensSaved - a.tokensSaved);
   if (entries.length === 0) {
@@ -259,6 +198,26 @@ function renderSavings(lifetime: LifetimeStats): string {
       `  best day  ${best.d}    ·  ${best.entry.tokensSaved.toLocaleString()} tok   ·  ${best.entry.calls} call${best.entry.calls === 1 ? "" : "s"}`,
     );
   }
+
+  // Extra sections (appended; never remove existing ones)
+  if (extra?.topProjects && extra.topProjects.length > 0) {
+    lines.push("");
+    lines.push(renderPerProjectSection(extra.topProjects));
+  }
+
+  const bestDay = renderBestDaySection(lifetime);
+  if (bestDay) {
+    lines.push("");
+    lines.push(bestDay);
+  }
+
+  lines.push("");
+  const calibLine = renderCalibrationLine(
+    extra?.calibrationRatio ?? 4,
+    extra?.calibrationPresent ?? false,
+  );
+  lines.push(calibLine);
+
   return lines.join("\n");
 }
 
@@ -322,6 +281,9 @@ async function ashlrRead(input: { path: string; bypassSummary?: boolean }): Prom
   // large source files. For files > 16KB, summarize the raw content (the LLM
   // can preserve symbol-level structure snipCompact can't). Small files skip
   // summarization entirely (threshold check inside summarizeIfLarge).
+  if (!(content.length > out.length)) {
+    await logEvent("tool_noop", { tool: "ashlr__read", reason: "small-file" });
+  }
   const summarizeInput = content.length > out.length ? content : out;
   const summarized = await summarizeIfLarge(summarizeInput, {
     toolName: "ashlr__read",
@@ -343,6 +305,62 @@ async function ashlrRead(input: { path: string; bypassSummary?: boolean }): Prom
   return finalText;
 }
 
+/**
+ * Resolve rg via Bun.which (walks PATH and common Homebrew locations). Shell
+ * aliases like Claude Code's own rg wrapper don't resolve under spawn, so we
+ * need the actual binary. Returns "rg" as last resort so spawn can at least
+ * surface a useful error.
+ */
+function resolveRg(): string {
+  return (
+    (typeof (globalThis as { Bun?: { which(bin: string): string | null } }).Bun !== "undefined"
+      ? (globalThis as { Bun: { which(bin: string): string | null } }).Bun.which("rg")
+      : null) ??
+    ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"].find((p) => {
+      try {
+        require("fs").accessSync(p);
+        return true;
+      } catch {
+        return false;
+      }
+    }) ??
+    "rg"
+  );
+}
+
+/**
+ * Estimate total matches by shelling out to `rg -c` (count-only, small
+ * output). Returns null when rg is unavailable or the call fails — callers
+ * should treat null as "unknown" rather than zero.
+ *
+ * This is the *confidence signal* for genome-routed greps: it lets the
+ * caller tell the model "genome returned N sections, rg sees ~M total
+ * matches" so an incomplete summary doesn't pass silently. Cost is tiny
+ * (single-integer-per-file output) and timeout is short.
+ */
+function estimateMatchCount(pattern: string, cwd: string): number | null {
+  try {
+    const res = spawnSync(resolveRg(), ["-c", pattern, cwd], {
+      encoding: "utf-8",
+      timeout: 3_000,
+    });
+    if (res.status !== 0 && res.status !== 1) return null; // 1 == no matches
+    const out = res.stdout ?? "";
+    if (!out.trim()) return 0;
+    // `rg -c` output is `path:count` per line.
+    let total = 0;
+    for (const line of out.split("\n")) {
+      const idx = line.lastIndexOf(":");
+      if (idx < 0) continue;
+      const n = parseInt(line.slice(idx + 1), 10);
+      if (Number.isFinite(n)) total += n;
+    }
+    return total;
+  } catch {
+    return null;
+  }
+}
+
 async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?: boolean }): Promise<string> {
   const cwd = input.cwd ?? process.cwd();
 
@@ -361,36 +379,68 @@ async function ashlrGrep(input: { pattern: string; cwd?: string; bypassSummary?:
     }
   }
 
+  if (!genomeRoot) {
+    await logEvent("tool_fallback", { tool: "ashlr__grep", reason: "no-genome" });
+  }
+
   if (genomeRoot) {
-    const sections = await retrieveSectionsV2(genomeRoot, input.pattern, 4000);
+    const sections = await retrieveCached(genomeRoot, input.pattern, 4000);
+    if (sections.length === 0) {
+      await logEvent("tool_fallback", { tool: "ashlr__grep", reason: "genome-empty" });
+    }
     if (sections.length > 0) {
       const formatted = formatGenomeForPrompt(sections);
-      // Compare against a hypothetical "full file" grep cost ~ 4x the compressed
-      // retrieval. Conservative signal for savings until we have a real baseline.
-      await recordSaving(formatted.length * 4, formatted.length, "ashlr__grep");
-      const header = genomeIsParent
-        ? `[ashlr__grep] genome-retrieved ${sections.length} section(s) (from parent genome at ${genomeRoot})`
-        : `[ashlr__grep] genome-retrieved ${sections.length} section(s)`;
+      // Use empirical multiplier from ~/.ashlr/calibration.json when available;
+      // falls back to 4× (hardcoded guess) when no calibration has been run.
+      const grepsMultiplier = getCalibrationMultiplier();
+      let rawBytesEstimate = formatted.length * grepsMultiplier;
+
+      // ASHLR_CALIBRATE=1: run real rg --json in parallel to record the TRUE
+      // raw bytes. Adds to normal work but never blocks the tool response.
+      if (process.env.ASHLR_CALIBRATE === "1") {
+        try {
+          const calibRes = spawnSync(resolveRg(), ["--json", "-n", input.pattern, cwd], {
+            encoding: "buffer",
+            timeout: 5_000,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          const calibBuf = calibRes.stdout as Buffer | null;
+          const trueRawBytes = calibBuf ? calibBuf.length : 0;
+          // Never underreport — take the max of empirical and estimated.
+          rawBytesEstimate = Math.max(trueRawBytes, formatted.length * grepsMultiplier);
+        } catch {
+          // Calibration run failed — silently fall through to the estimate.
+        }
+      }
+
+      await recordSaving(rawBytesEstimate, formatted.length, "ashlr__grep");
+      // Run `rg -c` to get an independent estimate of total matches. If genome
+      // returned only N sections but ripgrep would find 10× that, the model
+      // needs to know it should escalate rather than trust a stale/partial
+      // retrieval. This is the fix for the silent-incomplete-genome risk.
+      const estimated = estimateMatchCount(input.pattern, cwd);
+      if (estimated !== null && estimated > sections.length * 4) {
+        await logEvent("tool_escalate", {
+          tool: "ashlr__grep",
+          reason: "incomplete-genome",
+          extra: { sections: sections.length, estimated },
+        });
+      }
+      const parentNote = genomeIsParent ? ` (from parent genome at ${genomeRoot})` : "";
+      const countNote =
+        estimated === null
+          ? ""
+          : ` · rg estimates ${estimated.toLocaleString()} total match${estimated === 1 ? "" : "es"}${
+              estimated > sections.length * 4
+                ? " · call with bypassSummary:true for the full ripgrep list"
+                : ""
+            }`;
+      const header = `[ashlr__grep] genome-retrieved ${sections.length} section(s)${parentNote}${countNote}`;
       return `${header}\n\n${formatted}`;
     }
   }
 
-  // Resolve rg via Bun.which (walks PATH and common Homebrew locations). Shell
-  // aliases like Claude Code's own rg wrapper don't resolve under spawn, so we
-  // need the actual binary.
-  const rgBin =
-    (typeof (globalThis as { Bun?: { which(bin: string): string | null } }).Bun !== "undefined"
-      ? (globalThis as { Bun: { which(bin: string): string | null } }).Bun.which("rg")
-      : null) ??
-    ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"].find((p) => {
-      try {
-        require("fs").accessSync(p);
-        return true;
-      } catch {
-        return false;
-      }
-    }) ??
-    "rg";
+  const rgBin = resolveRg();
 
   const res = spawnSync(rgBin, ["--json", "-n", input.pattern, cwd], {
     encoding: "utf-8",
@@ -548,9 +598,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return { content: [{ type: "text", text: res.text }] };
       }
       case "ashlr__savings": {
-        const lifetime = await loadLifetime();
+        const stats = await readStats();
+        const session = await readCurrentSession();
+        const topProjects = buildTopProjects();
+        const { ratio: calibrationRatio, present: calibrationPresent } = readCalibrationState();
+        const extra: ExtraContext = { topProjects, calibrationRatio, calibrationPresent };
         return {
-          content: [{ type: "text", text: renderSavings(lifetime) }],
+          content: [{ type: "text", text: renderSavings(session, stats.lifetime, extra) }],
         };
       }
       default:

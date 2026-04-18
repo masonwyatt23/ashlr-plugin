@@ -229,6 +229,12 @@ export interface BuildOpts {
   bunVersion?: () => Promise<string | null>;
 }
 
+/** Returns true if the allow array contains at least one ashlr MCP wildcard. */
+export function hasAshlrAllowEntry(allow: unknown): boolean {
+  if (!Array.isArray(allow)) return false;
+  return (allow as string[]).some((e) => /^mcp__ashlr(-|__)/.test(e) || e === "mcp__ashlr-*");
+}
+
 async function getBunVersion(): Promise<string | null> {
   try {
     const proc = spawn({ cmd: ["bun", "--version"], stdout: "pipe", stderr: "pipe" });
@@ -410,6 +416,23 @@ export async function buildReport(opts: BuildOpts): Promise<Report> {
     });
   } else {
     runtime.push({ status: "ok", label: "settings", detail: toggles });
+  }
+
+  // allowlist check
+  const allowList = settings?.permissions?.allow;
+  if (hasAshlrAllowEntry(allowList)) {
+    runtime.push({
+      status: "ok",
+      label: "allowlist",
+      detail: "ashlr MCP tools pre-approved in ~/.claude/settings.json",
+    });
+  } else {
+    runtime.push({
+      status: "fail",
+      label: "allowlist",
+      detail: "ashlr MCP tools not in allowlist — Claude Code will prompt on every ashlr__ call",
+      fix: "run: /ashlr-allow",
+    });
   }
 
   // status line

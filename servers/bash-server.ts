@@ -25,47 +25,12 @@ import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { randomBytes } from "crypto";
 import { summarizeIfLarge, PROMPTS } from "./_summarize";
+import { recordSaving as recordSavingCore } from "./_stats";
+import { logEvent } from "./_events";
 
-// ---------------------------------------------------------------------------
-// Savings tracker (shared schema with efficiency server)
-// ---------------------------------------------------------------------------
-
-interface Stats {
-  session: { calls: number; tokensSaved: number };
-  lifetime: { calls: number; tokensSaved: number };
-}
-
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
-const session: Stats["session"] = { calls: 0, tokensSaved: 0 };
-
-async function loadLifetime(): Promise<Stats["lifetime"]> {
-  if (!existsSync(STATS_PATH)) return { calls: 0, tokensSaved: 0 };
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Stats;
-    return raw.lifetime ?? { calls: 0, tokensSaved: 0 };
-  } catch {
-    return { calls: 0, tokensSaved: 0 };
-  }
-}
-
-async function persistStats(lifetime: Stats["lifetime"]): Promise<void> {
-  await mkdir(dirname(STATS_PATH), { recursive: true });
-  // Preserve any pre-existing session counters from sibling servers when we
-  // can — but keeping this server's own session counter as the source of
-  // truth is fine because the status line reads lifetime primarily.
-  const payload: Stats = { session, lifetime };
-  await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
-}
-
+// Bash always records under the "ashlr__bash" tool bucket.
 async function recordSaving(rawBytes: number, compactBytes: number): Promise<number> {
-  const saved = Math.max(0, Math.ceil((rawBytes - compactBytes) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  const lifetime = await loadLifetime();
-  lifetime.calls++;
-  lifetime.tokensSaved += saved;
-  await persistStats(lifetime);
-  return saved;
+  return recordSavingCore(rawBytes, compactBytes, "ashlr__bash");
 }
 
 // ---------------------------------------------------------------------------
@@ -80,14 +45,27 @@ const COMPRESS_THRESHOLD = 2048;
 // fits comfortably under typical 2KB token budgets after framing.
 const HEAD_BYTES = 800;
 const TAIL_BYTES = 800;
+// On a failing command (non-zero exit), the last 4KB almost certainly holds
+// the error stack. We expand the tail so errors are never lost to elision.
+const FAIL_TAIL_BYTES = 4096;
 
-function snipBytes(s: string): { out: string; saved: number } {
+interface SnipOptions {
+  /** When true, emit a sharper warning that an error may be in the elided gap. */
+  errorAware?: boolean;
+  /** When true, expand tail capture so non-zero-exit errors aren't dropped. */
+  exitedNonZero?: boolean;
+}
+
+function snipBytes(s: string, opts: SnipOptions = {}): { out: string; saved: number } {
   if (s.length <= COMPRESS_THRESHOLD) return { out: s, saved: 0 };
-  const elided = s.length - HEAD_BYTES - TAIL_BYTES;
-  const out =
-    s.slice(0, HEAD_BYTES) +
-    `\n[... ${elided.toLocaleString()} bytes of output elided ...]\n` +
-    s.slice(-TAIL_BYTES);
+  const tailBytes = opts.exitedNonZero ? FAIL_TAIL_BYTES : TAIL_BYTES;
+  // If expanding the tail would take us over the full length, just emit raw.
+  if (HEAD_BYTES + tailBytes >= s.length) return { out: s, saved: 0 };
+  const elided = s.length - HEAD_BYTES - tailBytes;
+  const warning = opts.errorAware
+    ? `\n[... ${elided.toLocaleString()} bytes elided · LLM summary unavailable · an error may be in this gap · pass bypassSummary:true for the full output ...]\n`
+    : `\n[... ${elided.toLocaleString()} bytes of output elided ...]\n`;
+  const out = s.slice(0, HEAD_BYTES) + warning + s.slice(-tailBytes);
   return { out, saved: s.length - out.length };
 }
 
@@ -393,13 +371,29 @@ async function ashlrBash(args: BashArgs): Promise<string> {
         body = s.text;
         compactBytes = s.outputBytes;
       } else {
-        const { out, saved } = snipBytes(res.stdout);
+        // LLM failed AND we're over the threshold — warn loudly, since the
+        // most likely scenario is that an error is hiding in the elided gap.
+        const exitedNonZero = res.exitCode != null && res.exitCode !== 0;
+        const { out, saved } = snipBytes(res.stdout, {
+          errorAware: true,
+          exitedNonZero,
+        });
+        if (exitedNonZero && saved > 0) {
+          await logEvent("tool_escalate", {
+            tool: "ashlr__bash",
+            reason: "nonzero-exit-elided",
+            extra: { exitCode: res.exitCode },
+          });
+        }
         body = out;
         compactBytes = out.length;
         if (saved > 0) savedNote = ` · [compact saved ${saved.toLocaleString()} bytes]`;
       }
     } else {
-      const { out, saved } = snipBytes(res.stdout);
+      // Baseline snip path — widen tail on non-zero exit so errors never drop.
+      const { out, saved } = snipBytes(res.stdout, {
+        exitedNonZero: res.exitCode != null && res.exitCode !== 0,
+      });
       body = out;
       compactBytes = out.length;
       if (saved > 0) savedNote = ` · [compact saved ${saved.toLocaleString()} bytes]`;

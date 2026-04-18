@@ -2,7 +2,11 @@
  * Unit tests for the ashlr status-line composer.
  *
  * We exercise buildStatusLine() with a synthetic HOME so each case gets an
- * isolated filesystem.  No real ~/.ashlr or ~/.claude is read.
+ * isolated filesystem. No real ~/.ashlr or ~/.claude is read.
+ *
+ * All tests pass a deterministic `env` (no ANSI color, fixed session id)
+ * so assertions work regardless of the developer's real terminal
+ * capabilities.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -14,6 +18,21 @@ import { buildStatusLine, formatTokens, renderSparkline } from "../scripts/savin
 
 let home: string;
 
+// Fixed session id so tests control exactly which bucket is read.
+const SID = "test-session";
+// Baseline env: no color, no animation, known session id. Tests that need
+// more (e.g. COLUMNS=120) merge into this.
+const BASE_ENV = Object.freeze({
+  NO_COLOR: "1",
+  ASHLR_STATUS_ANIMATE: "0",
+  CLAUDE_SESSION_ID: SID,
+  COLUMNS: "80",
+}) as Readonly<NodeJS.ProcessEnv>;
+
+function envWith(extras: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...BASE_ENV, ...extras };
+}
+
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "ashlr-statusline-"));
   await mkdir(join(home, ".claude"), { recursive: true });
@@ -24,8 +43,34 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-async function writeStats(stats: unknown): Promise<void> {
-  await writeFile(join(home, ".ashlr", "stats.json"), JSON.stringify(stats));
+interface V2TestStats {
+  sessionTokensSaved?: number;
+  sessionCalls?: number;
+  lifetimeTokensSaved?: number;
+  lifetimeCalls?: number;
+  byDay?: Record<string, { calls?: number; tokensSaved?: number }>;
+}
+
+async function writeStats(s: V2TestStats): Promise<void> {
+  const payload = {
+    schemaVersion: 2,
+    sessions: {
+      [SID]: {
+        startedAt: new Date().toISOString(),
+        lastSavingAt: null,
+        calls: s.sessionCalls ?? 0,
+        tokensSaved: s.sessionTokensSaved ?? 0,
+        byTool: {},
+      },
+    },
+    lifetime: {
+      calls: s.lifetimeCalls ?? 0,
+      tokensSaved: s.lifetimeTokensSaved ?? 0,
+      byTool: {},
+      byDay: s.byDay ?? {},
+    },
+  };
+  await writeFile(join(home, ".ashlr", "stats.json"), JSON.stringify(payload));
 }
 
 async function writeSettings(ashlr: unknown): Promise<void> {
@@ -51,7 +96,7 @@ describe("formatTokens", () => {
 describe("buildStatusLine", () => {
   test("no stats file, no settings → brand-only line (defaults)", () => {
     // Defaults: everything on, but counters are zero.
-    const line = buildStatusLine({ home, tipSeed: 0 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
     expect(line.startsWith("ashlr")).toBe(true);
     expect(line).toContain("session +0");
     expect(line).toContain("lifetime +0");
@@ -59,174 +104,165 @@ describe("buildStatusLine", () => {
   });
 
   test("stats present → formatted with K/M units", async () => {
-    await writeStats({
-      session: { calls: 4, tokensSaved: 12_345 },
-      lifetime: { calls: 100, tokensSaved: 1_240_000 },
-    });
-    const line = buildStatusLine({ home, tipSeed: 0 });
+    await writeStats({ sessionTokensSaved: 12_345, sessionCalls: 4, lifetimeTokensSaved: 1_240_000, lifetimeCalls: 100 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
     expect(line).toContain("session +12.3K");
     expect(line).toContain("lifetime +1.2M");
   });
 
   test("statusLine: false → empty string", async () => {
-    await writeStats({ session: { tokensSaved: 1000 }, lifetime: { tokensSaved: 1000 } });
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 1000 });
     await writeSettings({ statusLine: false });
-    expect(buildStatusLine({ home })).toBe("");
+    expect(buildStatusLine({ home, env: envWith() })).toBe("");
   });
 
   test("statusLineSession: false → lifetime only", async () => {
-    await writeStats({
-      session: { tokensSaved: 1000 },
-      lifetime: { tokensSaved: 5000 },
-    });
+    await writeStats({ sessionTokensSaved: 1000, lifetimeTokensSaved: 5000 });
     await writeSettings({ statusLineSession: false, statusLineTips: false });
-    const line = buildStatusLine({ home });
+    const line = buildStatusLine({ home, env: envWith() });
     expect(line).not.toContain("session");
     expect(line).toContain("lifetime +5.0K");
   });
 
   test("statusLineLifetime: false → session only", async () => {
-    await writeStats({
-      session: { tokensSaved: 2000 },
-      lifetime: { tokensSaved: 5000 },
-    });
+    await writeStats({ sessionTokensSaved: 2000, lifetimeTokensSaved: 5000 });
     await writeSettings({ statusLineLifetime: false, statusLineTips: false });
-    const line = buildStatusLine({ home });
+    const line = buildStatusLine({ home, env: envWith() });
     expect(line).toContain("session +2.0K");
     expect(line).not.toContain("lifetime");
   });
 
   test("tips disabled → no 'tip:' segment", async () => {
     await writeSettings({ statusLineTips: false });
-    const line = buildStatusLine({ home });
+    const line = buildStatusLine({ home, env: envWith() });
     expect(line).not.toContain("tip:");
   });
 
   test("tips enabled → tip segment appears (when it fits)", async () => {
-    await writeStats({ session: { tokensSaved: 10 }, lifetime: { tokensSaved: 10 } });
-    // Use a generous budget so the tip reliably fits regardless of which tip
-    // the seed lands on.
-    const line = buildStatusLine({ home, tipSeed: 0, env: { COLUMNS: "120" } });
+    await writeStats({ sessionTokensSaved: 10, lifetimeTokensSaved: 10 });
+    // Generous budget so any tip fits.
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith({ COLUMNS: "120" }) });
     expect(line).toContain("tip:");
   });
 
   test("corrupt stats.json → graceful fallback, no exception", async () => {
     await writeFile(join(home, ".ashlr", "stats.json"), "{not json");
-    const line = buildStatusLine({ home, tipSeed: 0 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
     expect(line.startsWith("ashlr")).toBe(true);
     expect(line).toContain("session +0");
   });
 
   test("corrupt settings.json → graceful fallback to defaults", async () => {
     await writeFile(join(home, ".claude", "settings.json"), "{broken");
-    await writeStats({ session: { tokensSaved: 7 }, lifetime: { tokensSaved: 9 } });
-    const line = buildStatusLine({ home, tipSeed: 0 });
+    await writeStats({ sessionTokensSaved: 7, lifetimeTokensSaved: 9 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
     expect(line).toContain("session +7");
     expect(line).toContain("lifetime +9");
   });
 
-  test("sparkline: default on, rendered with Braille chars between brand and session", async () => {
+  test("sparkline renders between brand and session", async () => {
     const today = new Date().toISOString().slice(0, 10);
     await writeStats({
-      session: { tokensSaved: 12_300 },
-      lifetime: {
-        tokensSaved: 1_240_000,
-        byDay: { [today]: { calls: 5, tokensSaved: 50_000 } },
-      },
+      sessionTokensSaved: 12_300,
+      lifetimeTokensSaved: 1_240_000,
+      byDay: { [today]: { calls: 5, tokensSaved: 50_000 } },
     });
-    const line = buildStatusLine({ home, tipSeed: 0 });
-    // Brand, space, then 7 Braille chars (one per day), then ' · session …'
-    expect(line).toMatch(/^ashlr [\u2800-\u28FF]{7} · session/);
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
+    // New format includes a heartbeat glyph (·) before the sparkline.
+    // Shape: "ashlr <heartbeat> <7-char spark> · session …"
+    // Sparkline ramp is 16-rung — braille + unicode block chars.
+    expect(line).toMatch(/^ashlr [\u00B7\u0024-\u007E\u2800-\u28FF] /);
+    expect(line).toContain("· session");
     expect(line.length).toBeLessThanOrEqual(80);
   });
 
-  test("sparkline: statusLineSparkline:false removes the Braille segment", async () => {
+  test("sparkline off removes the sparkline segment", async () => {
     await writeStats({
-      session: { tokensSaved: 12_300 },
-      lifetime: {
-        tokensSaved: 1_240_000,
-        byDay: { "2020-01-01": { calls: 5, tokensSaved: 50_000 } },
-      },
+      sessionTokensSaved: 12_300,
+      lifetimeTokensSaved: 1_240_000,
+      byDay: { "2020-01-01": { calls: 5, tokensSaved: 50_000 } },
     });
     await writeSettings({ statusLineSparkline: false });
-    const line = buildStatusLine({ home, tipSeed: 0 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
     expect(line.startsWith("ashlr · ")).toBe(true);
-    // No Braille glyphs present.
+    // No Braille glyphs anywhere in the line.
     expect(/[\u2800-\u28FF]/.test(line)).toBe(false);
   });
 
-  test("sparkline: chars scale relative to busiest day in the 7-day window", () => {
+  test("renderSparkline (legacy helper): chars scale relative to busiest day", () => {
     const now = new Date();
     const day = (offset: number) => {
       const d = new Date(now);
       d.setUTCDate(d.getUTCDate() - offset);
       return d.toISOString().slice(0, 10);
     };
-    // Today = max (100%), day-1 = 50%, rest empty.
     const byDay = {
       [day(0)]: { tokensSaved: 1000 },
       [day(1)]: { tokensSaved: 500 },
     };
     const spark = renderSparkline(byDay, 7);
     expect(spark.length).toBe(7);
-    // All chars are Braille.
     for (const ch of spark) expect(ch.codePointAt(0)! >= 0x2800 && ch.codePointAt(0)! <= 0x28FF).toBe(true);
-    // Today (index 6, last in window) is the fullest char: ⣿
     expect(spark[6]).toBe("\u28FF");
-    // Index 5 is day(1) — a mid-rung char, strictly between blank and full.
     expect(spark[5]).not.toBe("\u2800");
     expect(spark[5]).not.toBe("\u28FF");
-    // Index 0 (day(6), no data) is blank.
     expect(spark[0]).toBe("\u2800");
   });
 
-  test("sparkline: empty byDay yields all-blank 7-char string", () => {
+  test("renderSparkline (legacy helper): empty byDay yields all-blank", () => {
     expect(renderSparkline(undefined, 7)).toBe("\u2800".repeat(7));
     expect(renderSparkline({}, 7)).toBe("\u2800".repeat(7));
   });
 
   test("output stays within 80 chars", async () => {
-    await writeStats({
-      session: { tokensSaved: 999_999_999 },
-      lifetime: { tokensSaved: 999_999_999 },
-    });
+    await writeStats({ sessionTokensSaved: 999_999_999, lifetimeTokensSaved: 999_999_999 });
     for (let i = 0; i < 7; i++) {
-      const line = buildStatusLine({ home, tipSeed: i });
+      const line = buildStatusLine({ home, tipSeed: i, env: envWith() });
       expect(line.length).toBeLessThanOrEqual(80);
     }
   });
 
   test("wide terminal ($COLUMNS=120) → full tip renders", async () => {
-    await writeStats({
-      session: { tokensSaved: 999_999 },
-      lifetime: { tokensSaved: 999_999 },
-    });
+    await writeStats({ sessionTokensSaved: 999_999, lifetimeTokensSaved: 999_999 });
     // tipSeed: 6 targets "savings persist in ~/.ashlr/stats.json"
-    const line = buildStatusLine({ home, tipSeed: 6, env: { COLUMNS: "120" } });
+    const line = buildStatusLine({ home, tipSeed: 6, env: envWith({ COLUMNS: "120" }) });
     expect(line).toContain("tip: savings persist in ~/.ashlr/stats.json");
     expect(line.length).toBeLessThanOrEqual(120);
   });
 
   test("80-col terminal with long numbers → tip dropped cleanly, no mid-word truncation", async () => {
-    // Build worst-case: 9-digit numbers + a long tip seed.
-    await writeStats({
-      session: { tokensSaved: 999_999_999 },
-      lifetime: { tokensSaved: 999_999_999 },
-    });
+    await writeStats({ sessionTokensSaved: 999_999_999, lifetimeTokensSaved: 999_999_999 });
     for (let i = 0; i < 7; i++) {
-      const line = buildStatusLine({ home, tipSeed: i, env: { COLUMNS: "80" } });
+      const line = buildStatusLine({ home, tipSeed: i, env: envWith() });
       expect(line.length).toBeLessThanOrEqual(80);
-      // Never show a mid-word truncated tip ("tip: foo…").
       expect(line).not.toMatch(/tip: [^·]*…/);
     }
   });
 
   test("default $COLUMNS unset → falls back to 80 budget", async () => {
-    await writeStats({
-      session: { tokensSaved: 999_999_999 },
-      lifetime: { tokensSaved: 999_999_999 },
-    });
-    const line = buildStatusLine({ home, tipSeed: 0, env: {} });
+    await writeStats({ sessionTokensSaved: 999_999_999, lifetimeTokensSaved: 999_999_999 });
+    const line = buildStatusLine({ home, tipSeed: 0, env: { NO_COLOR: "1", ASHLR_STATUS_ANIMATE: "0", CLAUDE_SESSION_ID: SID } });
     expect(line.length).toBeLessThanOrEqual(80);
+  });
+
+  test("activity pulse: recent lastSavingAt makes line include no ANSI when animation off (no regressions)", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = {
+      schemaVersion: 2,
+      sessions: {
+        [SID]: {
+          startedAt: new Date().toISOString(),
+          lastSavingAt: new Date().toISOString(),
+          calls: 5,
+          tokensSaved: 1234,
+          byTool: {},
+        },
+      },
+      lifetime: { calls: 5, tokensSaved: 1234, byTool: {}, byDay: { [today]: { calls: 5, tokensSaved: 1234 } } },
+    };
+    await writeFile(join(home, ".ashlr", "stats.json"), JSON.stringify(stats));
+    const line = buildStatusLine({ home, tipSeed: 0, env: envWith() });
+    // ANSI escape CSI sequence should not appear when animation is disabled.
+    expect(line).not.toMatch(/\x1b\[/);
   });
 });

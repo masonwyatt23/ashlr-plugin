@@ -11,6 +11,9 @@ let stubServer: { stop(): void; port: number; lastBody: any };
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "ashlr-summ-"));
   process.env.HOME = tmp;
+  // Tests inspect on-disk stats.json directly after bumpStat; force sync
+  // writes so the assertion doesn't race the 250ms debounce timer.
+  process.env.ASHLR_STATS_SYNC = "1";
   await mkdir(join(tmp, ".ashlr"), { recursive: true });
 });
 

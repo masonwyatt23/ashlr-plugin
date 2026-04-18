@@ -20,10 +20,12 @@
  *              }
  *
  * Design notes:
- *   - We never hard-deny. The goal is a *nudge* — the user (or autonomous
- *     agent) can still choose to proceed with the built-in tool. We use
- *     `permissionDecision: "ask"` to surface the suggestion, and inject
- *     `additionalContext` so the agent learns about the alternative.
+ *   - We never hard-deny and NEVER set `permissionDecision` — setting it to
+ *     "ask" causes Claude Code to surface a permission prompt even in
+ *     `bypassPermissions` mode (per the docs, ask rules are evaluated
+ *     regardless of mode). The goal is a *silent nudge* via `additionalContext`
+ *     only. The agent learns about `ashlr__*` alternatives; the built-in call
+ *     still proceeds without user interruption.
  *   - Read is only intercepted when the file is > 2 KB (matches the snipCompact
  *     threshold in efficiency-server.ts). Tiny files have nothing to compact,
  *     so we pass through silently.
@@ -50,8 +52,6 @@ interface HookOutput {
   hookSpecificOutput: {
     hookEventName: "PreToolUse";
     additionalContext?: string;
-    permissionDecision?: "ask" | "allow" | "deny";
-    permissionDecisionReason?: string;
   };
 }
 
@@ -61,12 +61,15 @@ function passThrough(): HookOutput {
   return { hookSpecificOutput: { hookEventName: "PreToolUse" } };
 }
 
-function nudge(reason: string, context: string): HookOutput {
+// Silent nudge — inject additionalContext only. Claude Code proceeds with
+// the built-in call without surfacing a permission prompt (setting
+// `permissionDecision` here would force a prompt even in bypass mode).
+// The `reason` arg is ignored at the response layer but retained for
+// call-site readability and possible future observability.
+function nudge(_reason: string, context: string): HookOutput {
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "ask",
-      permissionDecisionReason: reason,
       additionalContext: context,
     },
   };

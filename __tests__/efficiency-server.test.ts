@@ -605,3 +605,63 @@ describe("MCP server · error handling", () => {
     expect(r.result.content[0].text).toContain("Unknown tool");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fallback event emission — no-genome grep writes a tool_fallback record
+// ---------------------------------------------------------------------------
+
+describe("MCP server · fallback event emission", () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "ashlr-fallback-test-"));
+    await mkdir(join(home, ".ashlr"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  test("no-genome grep emits tool_fallback with reason=no-genome into session log", async () => {
+    // Create a minimal project dir without a genome so the no-genome path fires.
+    const projDir = join(home, "proj");
+    await mkdir(projDir, { recursive: true });
+    await writeFile(join(projDir, "hello.txt"), "hello world\n");
+
+    const logPath = join(home, ".ashlr", "session-log.jsonl");
+
+    await rpcWithHome(
+      [
+        INIT,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name: "ashlr__grep", arguments: { pattern: "hello", cwd: projDir } },
+        },
+      ],
+      home,
+    );
+
+    // Give the async appendFile a tick to complete.
+    await new Promise((r) => setTimeout(r, 100));
+
+    let records: Record<string, unknown>[] = [];
+    try {
+      const raw = await readFile(logPath, "utf-8");
+      records = raw
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+    } catch {
+      // log may not exist if kill switch fired — that's a test failure below
+    }
+
+    const fallback = records.find(
+      (r) => r.event === "tool_fallback" && r.tool === "ashlr__grep" && r.reason === "no-genome",
+    );
+    expect(fallback).toBeDefined();
+    expect(fallback!.tool).toBe("ashlr__grep");
+    expect(fallback!.reason).toBe("no-genome");
+  });
+});

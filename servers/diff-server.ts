@@ -25,53 +25,15 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join } from "path";
 import { summarizeIfLarge, PROMPTS } from "./_summarize";
-
-// ---------------------------------------------------------------------------
-// Savings tracker (shared schema)
-// ---------------------------------------------------------------------------
-
-interface Stats {
-  session: { calls: number; tokensSaved: number };
-  lifetime: { calls: number; tokensSaved: number };
-}
-
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
-const session: Stats["session"] = { calls: 0, tokensSaved: 0 };
-
-async function loadLifetime(): Promise<Stats["lifetime"]> {
-  if (!existsSync(STATS_PATH)) return { calls: 0, tokensSaved: 0 };
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Stats;
-    return raw.lifetime ?? { calls: 0, tokensSaved: 0 };
-  } catch {
-    return { calls: 0, tokensSaved: 0 };
-  }
-}
-
-async function persistStats(lifetime: Stats["lifetime"]): Promise<void> {
-  await mkdir(dirname(STATS_PATH), { recursive: true });
-  const payload: Stats = { session, lifetime };
-  await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
-}
+import { recordSaving as recordSavingCore } from "./_stats";
 
 async function recordSaving(
   rawBytes: number,
   compactBytes: number,
-  _tool: "ashlr__diff",
+  tool: "ashlr__diff",
 ): Promise<number> {
-  void _tool;
-  const saved = Math.max(0, Math.ceil((rawBytes - compactBytes) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  const lifetime = await loadLifetime();
-  lifetime.calls++;
-  lifetime.tokensSaved += saved;
-  await persistStats(lifetime);
-  return saved;
+  return recordSavingCore(rawBytes, compactBytes, tool);
 }
 
 // ---------------------------------------------------------------------------

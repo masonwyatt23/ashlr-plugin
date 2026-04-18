@@ -20,10 +20,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, statSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join, relative, resolve } from "path";
+import { statSync } from "fs";
+import { readFile } from "fs/promises";
+import { join, relative, resolve } from "path";
 import { spawnSync } from "child_process";
 
 import {
@@ -36,6 +35,7 @@ import {
 
 import { scan, formatBaseline, listFiles } from "../scripts/baseline-scan";
 import { readFileSync } from "fs";
+import { recordSaving as recordSavingCore } from "./_stats";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -53,38 +53,9 @@ export const ORIENT_SYSTEM_PROMPT =
   "suggested next tool call for the agent (e.g. `ashlr__read X` or " +
   "`ashlr__grep Y`). Be specific. Don't hallucinate context that isn't shown.";
 
-// ---------------------------------------------------------------------------
-// Savings accounting (byTool-compatible)
-// ---------------------------------------------------------------------------
-
-function statsPath(): string {
-  return join(process.env.HOME ?? homedir(), ".ashlr", "stats.json");
-}
-
+// Records a saving event against the shared stats store.
 async function recordSaving(rawBytes: number, compactBytes: number, tool: string): Promise<void> {
-  const saved = Math.max(0, Math.ceil((rawBytes - compactBytes) / 4));
-  const path = statsPath();
-  let data: any = {};
-  if (existsSync(path)) {
-    try { data = JSON.parse(await readFile(path, "utf-8")); } catch { data = {}; }
-  }
-  data.lifetime = data.lifetime ?? { calls: 0, tokensSaved: 0, byTool: {}, byDay: {} };
-  data.session  = data.session  ?? { startedAt: new Date().toISOString(), calls: 0, tokensSaved: 0, byTool: {} };
-  for (const scope of [data.lifetime, data.session]) {
-    scope.calls++;
-    scope.tokensSaved += saved;
-    scope.byTool = scope.byTool ?? {};
-    scope.byTool[tool] = scope.byTool[tool] ?? { calls: 0, tokensSaved: 0 };
-    scope.byTool[tool].calls++;
-    scope.byTool[tool].tokensSaved += saved;
-  }
-  const day = new Date().toISOString().slice(0, 10);
-  data.lifetime.byDay = data.lifetime.byDay ?? {};
-  data.lifetime.byDay[day] = data.lifetime.byDay[day] ?? { calls: 0, tokensSaved: 0 };
-  data.lifetime.byDay[day].calls++;
-  data.lifetime.byDay[day].tokensSaved += saved;
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(data, null, 2));
+  await recordSavingCore(rawBytes, compactBytes, tool);
 }
 
 // ---------------------------------------------------------------------------

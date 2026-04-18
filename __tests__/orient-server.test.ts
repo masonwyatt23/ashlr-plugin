@@ -25,6 +25,11 @@ beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "ashlr-orient-home-"));
   project = await mkdtemp(join(tmpdir(), "ashlr-orient-proj-"));
   process.env.HOME = home;
+  // Stats writes are debounced by default; this test asserts on-disk state
+  // via direct readFile immediately after a recordSaving, so we need
+  // synchronous writes. Package-level `bun run test` also sets this; we
+  // set it locally so `bun test __tests__/orient-server.test.ts` works too.
+  process.env.ASHLR_STATS_SYNC = "1";
   delete process.env.ASHLR_LLM_URL;
   delete process.env.ASHLR_LLM_KEY;
   await mkdir(join(home, ".ashlr"), { recursive: true });
@@ -118,7 +123,11 @@ describe("orient · grep path (no genome)", () => {
     const stats = JSON.parse(await readFile(join(home, ".ashlr", "stats.json"), "utf-8"));
     expect(stats.lifetime.byTool["ashlr__orient"]).toBeTruthy();
     expect(stats.lifetime.byTool["ashlr__orient"].calls).toBe(1);
-    expect(stats.session.byTool["ashlr__orient"].calls).toBe(1);
+    // v2 schema: session is under sessions[<id>] keyed by CLAUDE_SESSION_ID or
+    // a PPID-derived fallback. Assert that at least one bucket recorded orient.
+    const sessionBuckets = Object.values(stats.sessions ?? {}) as Array<{ byTool?: Record<string, { calls: number }> }>;
+    const orientCalls = sessionBuckets.reduce((n, b) => n + (b.byTool?.["ashlr__orient"]?.calls ?? 0), 0);
+    expect(orientCalls).toBe(1);
   });
 });
 

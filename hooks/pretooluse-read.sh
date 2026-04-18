@@ -25,7 +25,19 @@ set -u
 
 THRESHOLD=2048
 
-# Global escape hatch.
+# Enforcement is OFF by default. The hard-block via `exit 2` was too
+# aggressive — it interrupted the user in `bypassPermissions` mode when all
+# they wanted was a silent suggestion. `hooks/tool-redirect.ts` already
+# injects an `additionalContext` nudge for large reads; that nudge is
+# sufficient for the agent to route through ashlr__read on its next attempt.
+#
+# To re-enable hard enforcement (e.g. on CI where you want zero tolerance
+# for full-file reads), set ASHLR_ENFORCE=1. `ASHLR_NO_ENFORCE=1` remains
+# honored for backwards compatibility with anyone scripting against the
+# old flag name.
+if [ "${ASHLR_ENFORCE:-0}" != "1" ]; then
+  exit 0
+fi
 if [ "${ASHLR_NO_ENFORCE:-0}" = "1" ]; then
   exit 0
 fi

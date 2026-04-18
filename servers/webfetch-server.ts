@@ -1,0 +1,153 @@
+#!/usr/bin/env bun
+/**
+ * ashlr-webfetch MCP server — token-efficient article extraction.
+ *
+ * Narrowly focused: give it a URL, get the readable text the model would see
+ * from native WebFetch, but aggressively compressed. HTML → title + main
+ * content; JSON → pretty + array-elide; plain text → byte-capped passthrough.
+ * Default cap: 100 KB (native WebFetch is uncapped).
+ */
+
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { recordSaving } from "./_stats";
+import { isPrivateHost, compressHtml, compressJson } from "./_http-helpers";
+
+// ---------- types ----------
+
+interface WebFetchArgs {
+  url: string;
+  prompt?: string;
+  maxBytes?: number;
+}
+
+// ---------- text helpers ----------
+
+function snipCompact(s: string, maxBytes: number): { text: string; snipped: boolean } {
+  if (s.length <= maxBytes) return { text: s, snipped: false };
+  const half = Math.floor(maxBytes / 2);
+  const head = s.slice(0, half);
+  const tail = s.slice(s.length - half);
+  const elided = s.length - maxBytes;
+  return {
+    text: `${head}\n\n[... ${elided} bytes elided — use a larger maxBytes to see more ...]\n\n${tail}`,
+    snipped: true,
+  };
+}
+
+function extractTitle(html: string): string | null {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return null;
+  return m[1]!.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+// ---------- core ----------
+
+async function doWebFetch(args: WebFetchArgs): Promise<string> {
+  const { url, prompt, maxBytes = 100_000 } = args;
+
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error(`invalid URL: ${url}`); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`unsupported scheme: ${parsed.protocol} (http/https only)`);
+  }
+  if (isPrivateHost(parsed.hostname)) {
+    throw new Error(`refusing private host ${parsed.hostname}; set ASHLR_HTTP_ALLOW_PRIVATE=1 to override`);
+  }
+
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 20_000);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { "user-agent": "ashlr-plugin/0.7.0 (+https://plugin.ashlr.ai)" },
+      redirect: "follow",
+      signal: ctl.signal,
+    });
+  } catch (err) {
+    clearTimeout(t);
+    throw new Error(`fetch failed: ${(err as Error).message}`);
+  }
+  clearTimeout(t);
+
+  const ct = res.headers.get("content-type") ?? "";
+  const buf = await res.arrayBuffer();
+  const rawText = new TextDecoder().decode(buf);
+  const rawBytes = rawText.length;
+
+  let extracted: string;
+  let title: string | null = null;
+
+  if (ct.includes("json")) {
+    extracted = compressJson(rawText);
+  } else if (ct.includes("html") || ct.includes("xml") || ct.includes("text/plain") === false && rawText.trimStart().startsWith("<")) {
+    title = extractTitle(rawText);
+    extracted = compressHtml(rawText);
+  } else {
+    // plain text or unknown — passthrough with cap
+    extracted = rawText;
+  }
+
+  const { text: capped, snipped } = snipCompact(extracted, maxBytes);
+
+  const lines: string[] = [];
+  if (prompt) lines.push(`[webfetch · prompt: "${prompt}"]`);
+  if (title) lines.push(`# ${title}\n`);
+  lines.push(capped);
+  if (snipped) {
+    lines.push(`\n[content truncated at ${maxBytes} bytes — pass a larger maxBytes to see more]`);
+  }
+
+  const compactBytes = lines.join("\n").length;
+  await recordSaving(rawBytes, compactBytes, "ashlr__webfetch");
+
+  const ratio = rawBytes > 0 ? ((1 - compactBytes / rawBytes) * 100).toFixed(0) : "0";
+  lines.push(
+    `\n[ashlr__webfetch] URL: ${url} · raw: ${rawBytes}bytes · extracted: ${compactBytes}bytes · ${ratio}% reduction`,
+  );
+
+  return lines.join("\n");
+}
+
+// ---------- MCP wiring ----------
+
+const server = new Server(
+  { name: "ashlr-webfetch", version: "0.1.0" },
+  { capabilities: { tools: {} } },
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [{
+    name: "ashlr__webfetch",
+    description:
+      "Token-efficient URL fetcher. Aggressively extracts article text from HTML (title + main content, strips nav/scripts/styles), pretty-prints + array-elides JSON, byte-caps plain text. Default cap 100 KB vs native WebFetch which is uncapped. Use instead of WebFetch when you want article content — saves 60-95% tokens on typical pages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url:      { type: "string", description: "URL to fetch (http/https only)" },
+        prompt:   { type: "string", description: "What you're looking for — included as a hint in the output header" },
+        maxBytes: { type: "number", description: "Max bytes of extracted text (default 100000)" },
+      },
+      required: ["url"],
+    },
+  }],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  if (req.params.name !== "ashlr__webfetch") {
+    return { content: [{ type: "text", text: `Unknown tool: ${req.params.name}` }], isError: true };
+  }
+  try {
+    const text = await doWebFetch(req.params.arguments as unknown as WebFetchArgs);
+    return { content: [{ type: "text", text }] };
+  } catch (err) {
+    return { content: [{ type: "text", text: `ashlr__webfetch error: ${(err as Error).message}` }], isError: true };
+  }
+});
+
+const transport = new StdioServerTransport();
+await server.connect(transport);

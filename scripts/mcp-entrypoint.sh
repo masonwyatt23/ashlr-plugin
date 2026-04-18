@@ -50,5 +50,15 @@ if [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$PARENT" ] && [
   done
 fi
 
-# 3. Exec the requested server script with any remaining args.
+# 3. Forward Claude Code's session id so MCP servers can attribute savings to
+#    the correct per-session bucket in ~/.ashlr/stats.json. Without this, the
+#    status line's "session +N" number gets clobbered across concurrent
+#    terminals. We export both the canonical name and a mirror so any tool in
+#    the subprocess tree can read it.
+if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+  export CLAUDE_SESSION_ID
+  export ASHLR_SESSION_ID="$CLAUDE_SESSION_ID"
+fi
+
+# 4. Exec the requested server script with any remaining args.
 exec bun run "$@"

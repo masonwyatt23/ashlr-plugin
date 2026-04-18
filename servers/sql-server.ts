@@ -21,43 +21,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync } from "fs";
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join, isAbsolute, resolve } from "path";
+import { isAbsolute, join, resolve } from "path";
 import { summarizeIfLarge, PROMPTS } from "./_summarize";
-
-// ---------------------------------------------------------------------------
-// Savings tracker (mirrors efficiency-server.ts; small dup is intentional)
-// ---------------------------------------------------------------------------
-
-interface Stats {
-  session: { calls: number; tokensSaved: number };
-  lifetime: { calls: number; tokensSaved: number };
-}
-
-const STATS_PATH = join(process.env.HOME ?? homedir(), ".ashlr", "stats.json");
-const session: Stats["session"] = { calls: 0, tokensSaved: 0 };
-
-async function loadLifetime(): Promise<Stats["lifetime"]> {
-  if (!existsSync(STATS_PATH)) return { calls: 0, tokensSaved: 0 };
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Stats;
-    return raw.lifetime ?? { calls: 0, tokensSaved: 0 };
-  } catch {
-    return { calls: 0, tokensSaved: 0 };
-  }
-}
+import { recordSaving as recordSavingCore } from "./_stats";
 
 async function recordSaving(rawChars: number, compactChars: number): Promise<void> {
-  const saved = Math.max(0, Math.ceil((rawChars - compactChars) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  const lifetime = await loadLifetime();
-  lifetime.calls++;
-  lifetime.tokensSaved += saved;
-  await mkdir(dirname(STATS_PATH), { recursive: true });
-  const payload: Stats = { session, lifetime };
-  await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
+  await recordSavingCore(rawChars, compactChars, "ashlr__sql");
 }
 
 // ---------------------------------------------------------------------------

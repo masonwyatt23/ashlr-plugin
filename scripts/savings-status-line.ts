@@ -27,14 +27,62 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { c } from "./ui.ts";
+import {
+  detectCapability,
+  frameAt,
+  renderHeartbeat,
+  renderSparkline as renderAnimatedSparkline,
+  visibleWidth,
+  type Capability,
+} from "./ui-animation.ts";
 
+// ---------------------------------------------------------------------------
+// Stats shape (v2 schema — keyed by session id)
+// ---------------------------------------------------------------------------
+//
+// We read the file defensively and support both the v1 shape (`session`
+// singular) and the v2 shape (`sessions` map + `schemaVersion: 2`). The
+// status line should never crash a terminal because stats.json is on an
+// old version — we just fall back to zero.
+
+interface ByDay { [date: string]: { calls?: number; tokensSaved?: number } }
+interface SessionBucket {
+  calls?: number;
+  tokensSaved?: number;
+  lastSavingAt?: string | null;
+}
 interface Stats {
-  session?: { calls?: number; tokensSaved?: number };
+  schemaVersion?: number;
+  /** v2: per-session buckets keyed by CLAUDE_SESSION_ID. */
+  sessions?: Record<string, SessionBucket>;
+  /** v1 legacy shape — kept for readback compatibility during migration. */
+  session?: SessionBucket;
   lifetime?: {
     calls?: number;
     tokensSaved?: number;
-    byDay?: Record<string, { calls?: number; tokensSaved?: number }>;
+    byDay?: ByDay;
   };
+}
+
+function currentSessionId(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.CLAUDE_SESSION_ID ?? env.ASHLR_SESSION_ID;
+  if (explicit && explicit.trim().length > 0) return explicit.trim();
+  // Fallback to the same PPID-derived hash shape _stats.ts uses so a
+  // terminal without CLAUDE_SESSION_ID still reads its own bucket.
+  const seed = `ppid:${typeof process.ppid === "number" ? process.ppid : "?"}:${env.HOME ?? ""}`;
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
+  return `p${(h >>> 0).toString(16)}`;
+}
+
+/** Return the current session's counters, or null if unknown. */
+function pickSession(stats: Stats | null, sessionId: string): SessionBucket | null {
+  if (!stats) return null;
+  if (stats.sessions && stats.sessions[sessionId]) return stats.sessions[sessionId]!;
+  // If v1 shape is still on disk, don't use it — the legacy global session
+  // is exactly the counter that lies across terminals. Return null so the
+  // status line shows 0 until the session records something.
+  return null;
 }
 
 interface AshlrSettings {
@@ -183,12 +231,16 @@ export interface BuildOptions {
   budget?: number;
   /** Environment to read $COLUMNS from — used by tests. */
   env?: NodeJS.ProcessEnv;
+  /** Clock injection — tests pin this; production uses Date.now. */
+  now?: number;
 }
 
 export function buildStatusLine(opts: BuildOptions = {}): string {
   try {
     const home = opts.home ?? homedir();
-    const budget = opts.budget ?? resolveBudget(opts.env);
+    const env = opts.env ?? process.env;
+    const budget = opts.budget ?? resolveBudget(env);
+    const now = opts.now ?? Date.now();
     const settings = readJsonCached<{ ashlr?: AshlrSettings }>(
       join(home, ".claude", "settings.json"),
     );
@@ -204,14 +256,31 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
     const showSpark = cfg.statusLineSparkline ?? true;
 
     const stats = readJsonCached<Stats>(join(home, ".ashlr", "stats.json"));
-    const session = stats?.session?.tokensSaved ?? 0;
+    const sessionId = currentSessionId(env);
+    const sess = pickSession(stats, sessionId);
+    const session = sess?.tokensSaved ?? 0;
     const lifetime = stats?.lifetime?.tokensSaved ?? 0;
+    const lastSavingAt = sess?.lastSavingAt ?? null;
+    const msSinceActive = lastSavingAt ? Math.max(0, now - Date.parse(lastSavingAt)) : Number.POSITIVE_INFINITY;
 
-    // Build the PLAIN line first so we can apply the 80-col budget cleanly.
-    // Colors get layered on at the end and never affect the measured length
-    // (c.* helpers no-op unless FORCE_COLOR or a TTY is detected, and the
-    // status-line subprocess is typically neither).
-    const brand = showSpark ? `ashlr ${renderSparkline(stats?.lifetime?.byDay, 7)}` : "ashlr";
+    const cap = detectCapability(env);
+    const frame = frameAt(now);
+
+    // -----------------------------------------------------------------------
+    // Left edge: "ashlr" brand + heartbeat + animated sparkline
+    // -----------------------------------------------------------------------
+    const brandParts: string[] = ["ashlr"];
+    if (showSpark) {
+      // Heartbeat glyph: dim middle-dot when idle, braille-wave when active.
+      brandParts.push(renderHeartbeat(frame, msSinceActive, cap));
+      // 7-day sparkline. Values come from the existing lifetime.byDay map
+      // so the 7-day shape stays stable across the new per-session stats.
+      const keys = lastNDayKeys(7);
+      const values = keys.map((k) => stats?.lifetime?.byDay?.[k]?.tokensSaved ?? 0);
+      brandParts.push(renderAnimatedSparkline({ values, frame, msSinceActive, cap }));
+    }
+    const brand = brandParts.join(" ");
+
     const parts: string[] = [brand];
     if (showSession) parts.push(`session +${formatTokens(session)}`);
     if (showLifetime) parts.push(`lifetime +${formatTokens(lifetime)}`);
@@ -221,27 +290,20 @@ export function buildStatusLine(opts: BuildOptions = {}): string {
     if (showTips) {
       const tip = pickTip(TIPS, opts.tipSeed);
       const candidate = `${line} · tip: ${tip}`;
-      if (candidate.length <= budget) {
+      if (visibleWidth(candidate) <= budget) {
         line = candidate;
       }
-      // If the full tip doesn't fit, drop it cleanly rather than show a
-      // mid-word truncation like "tip: a…". We only consider showing a
-      // partial tip when the remaining room is ≥ 15 chars, which is enough
-      // for a recognizable hint; otherwise we drop the tip entirely.
-      else {
-        const remaining = budget - line.length - " · tip: ".length;
-        if (remaining >= 15 && tip.length <= remaining) {
-          line = candidate; // safety net — already covered above but explicit.
-        }
-        // else: drop the tip entirely (no partial/truncated rendering).
-      }
+      // Otherwise drop the tip entirely (no partial/truncated rendering).
     }
 
-    if (line.length > budget) line = line.slice(0, budget - 1) + "…";
+    // Budget enforcement operates on VISIBLE width — ANSI escapes don't count.
+    if (visibleWidth(line) > budget) {
+      // Naive slice works because our ANSI runs only bracket colored regions
+      // ("…m<char>…\x1b[0m"). In practice we hit budget only when tip was
+      // dropped already; cutting here is a last-resort safety.
+      line = line.slice(0, budget - 1) + "…";
+    }
 
-    // Final step — colorize. When not in a color-enabled environment this is
-    // a no-op. Tests run without a TTY so the string length assertions still
-    // hold.
     return colorize(line);
   } catch {
     return "";

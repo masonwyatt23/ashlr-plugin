@@ -38,7 +38,6 @@ const PROMPT_VERSION = 1; // bump if you change any per-tool prompt
 // Prefer $HOME env (test-friendly) over homedir() (which reads /etc/passwd).
 function home(): string       { return process.env.HOME ?? homedir(); }
 function cacheDir(): string   { return join(home(), ".ashlr", "summary-cache"); }
-function statsPath(): string  { return join(home(), ".ashlr", "stats.json"); }
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -85,9 +84,11 @@ export async function summarizeIfLarge(
 
   // Below threshold or explicit bypass → no summarization.
   if (rawBytes <= threshold) {
+    await logEvent("tool_noop", { tool: opts.toolName, reason: "below-threshold" });
     return { text: rawText, summarized: false, wasCached: false, fellBack: false, outputBytes: rawBytes };
   }
   if (opts.bypass) {
+    await logEvent("tool_noop", { tool: opts.toolName, reason: "bypassed" });
     return {
       text: rawText + "\n\n[ashlr · summarization bypassed (bypassSummary:true)]",
       summarized: false,
@@ -119,6 +120,7 @@ export async function summarizeIfLarge(
 
   if (summary == null) {
     // Graceful degradation: snipCompact-style fallback
+    await logEvent("tool_fallback", { tool: opts.toolName, reason: "llm-unreachable" });
     const fallback = snipFallback(rawText) + "\n\n[ashlr · LLM unreachable, fell back to truncation]";
     return {
       text: fallback,
@@ -225,23 +227,14 @@ function bypassHint(rawBytes: number, summaryBytes: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Stats — write summarization counters into ~/.ashlr/stats.json
+// Stats — delegate to shared _stats.ts so all writes share one lock+schema.
 // ---------------------------------------------------------------------------
 
+import { bumpSummarization } from "./_stats";
+import { logEvent } from "./_events";
+
 async function bumpStat(field: "calls" | "cacheHits"): Promise<void> {
-  const path = statsPath();
-  try {
-    let data: any = {};
-    if (existsSync(path)) {
-      try { data = JSON.parse(await readFile(path, "utf-8")); } catch { data = {}; }
-    }
-    data.summarization = data.summarization ?? { calls: 0, cacheHits: 0 };
-    data.summarization[field] = (data.summarization[field] ?? 0) + 1;
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify(data, null, 2));
-  } catch {
-    // Stats are best-effort; never throw.
-  }
+  try { await bumpSummarization(field); } catch { /* best-effort */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,9 +244,11 @@ async function bumpStat(field: "calls" | "cacheHits"): Promise<void> {
 export const PROMPTS = {
   read:
     "You are summarizing a source code file for an AI coding agent. Output ≤500 chars. " +
-    "Preserve: file purpose (1 sentence), exported symbols (with line numbers like 'foo at L42'), " +
-    "key functions/classes (1 line each, with line ranges), notable patterns or gotchas. " +
-    "Preserve any TODO/FIXME/XXX/HACK markers verbatim with their line numbers. " +
+    "Preserve: file purpose (1 sentence), key functions/classes (1 line each with line ranges). " +
+    "Preserve VERBATIM with line numbers: every @-prefixed decorator or annotation (@deprecated, " +
+    "@Injectable, @staticmethod, etc.) with its associated symbol; every " +
+    "TODO|FIXME|XXX|HACK|WARNING|THREAD-UNSAFE|DEPRECATED|NOTE|SAFETY marker; " +
+    "every top-level export/module.exports/__all__ statement (symbol name only, not body). " +
     "Output as plain text — no markdown headers.",
 
   diff:

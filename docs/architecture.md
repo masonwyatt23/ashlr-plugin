@@ -1,0 +1,292 @@
+# ashlr-plugin Architecture
+
+Reference for contributors. Covers system shape, data flows, and conventions. All file references are relative to the plugin root unless otherwise noted.
+
+---
+
+## 1. Overview
+
+ashlr-plugin is a Claude Code plugin that wraps the native file, search, and edit tools with lower-token alternatives and adds a lightweight observability layer over tool usage and cost.
+
+Two value propositions:
+
+**Token efficiency.** `ashlr__read`, `ashlr__grep`, and `ashlr__edit` replace the built-in `Read`, `Grep`, and `Edit` tools. Large file reads are snip-compacted or LLM-summarized; grep calls route through a per-project genome index (RAG) when one exists, cutting tokens by ~84% on warm queries; edits send only diffs, not full file contents.
+
+**Observability.** Every tool call is accounted in `~/.ashlr/stats.json` (per-session + lifetime counters) and appended to `~/.ashlr/session-log.jsonl`. The status line in Claude Code's UI surfaces savings continuously. The genome scribe loop extracts architectural knowledge from tool results into `.ashlrcode/genome/`, which feeds back into future grep routing.
+
+The canonical wiring entry point is `.claude-plugin/plugin.json`. Every MCP server, hook, and status line command is registered there.
+
+---
+
+## 2. MCP Server Map
+
+Source of truth: `.claude-plugin/plugin.json:mcpServers`. All servers are launched via `scripts/mcp-entrypoint.sh`, which handles `bun install` on first run and forwards `CLAUDE_SESSION_ID`.
+
+| Server name | File | Tools | Replaces (native) |
+|---|---|---|---|
+| `ashlr-efficiency` | `servers/efficiency-server.ts` | `ashlr__read`, `ashlr__grep`, `ashlr__edit`, `ashlr__savings` | `Read`, `Grep`, `Edit` |
+| `ashlr-bash` | `servers/bash-server.ts` | `ashlr__bash`, `ashlr__bash_start`, `ashlr__bash_stop`, `ashlr__bash_tail`, `ashlr__bash_list` | `Bash` (long-running variant) |
+| `ashlr-diff` | `servers/diff-server.ts` | `ashlr__diff` | — (new surface) |
+| `ashlr-sql` | `servers/sql-server.ts` | `ashlr__sql` | — (new surface) |
+| `ashlr-tree` | `servers/tree-server.ts` | `ashlr__tree` | — (new surface) |
+| `ashlr-http` | `servers/http-server.ts` | `ashlr__http` | `WebFetch` |
+| `ashlr-logs` | `servers/logs-server.ts` | `ashlr__logs` | — (new surface) |
+| `ashlr-genome` | `servers/genome-server.ts` | `ashlr__genome_propose`, `ashlr__genome_consolidate`, `ashlr__genome_status` | — (new surface) |
+| `ashlr-orient` | `servers/orient-server.ts` | `ashlr__orient` | — (new surface) |
+| `ashlr-github` | `servers/github-server.ts` | `ashlr__issue`, `ashlr__pr` | — (wraps `gh` CLI) |
+| `ashlr-glob` | `servers/glob-server.ts` | `ashlr__glob` | `Glob` |
+| `ashlr-webfetch` | `servers/webfetch-server.ts` | `ashlr__webfetch` | `WebFetch` |
+
+The `ashlr-efficiency` server is the one most agents should route through by default. The rest are opt-in surface area.
+
+---
+
+## 3. Stats Data Flow
+
+### Per-session bucket shape
+
+`~/.ashlr/stats.json` holds a `sessions` map keyed by `CLAUDE_SESSION_ID` (or a PPID-derived fallback when the env var is absent). Each bucket:
+
+```
+sessions: {
+  "<session-id>": {
+    calls:        number,   // tool invocations attributed to this session
+    tokensSaved:  number,
+    costSaved:    number,
+    startedAt:    ISO-string,
+    byTool:       { [toolName]: { calls, tokensSaved, costSaved } },
+    projects:     { [cwd]: { calls, tokensSaved } },
+  }
+}
+```
+
+Lifetime totals live in `stats.lifetime` alongside the map and are never dropped.
+
+### Write path
+
+```
+MCP tool handler (e.g. ashlr__read)
+  └─ recordSaving(tokens, cost, tool, cwd)   servers/_stats.ts:recordSaving
+       └─ withSerializedWrite(fn)            in-process Promise mutex (writeQueue chain)
+            └─ acquireLock()                 ~/.ashlr/stats.lock (O_EXCL, 200ms spin)
+                 └─ readStats()              JSON.parse(readFileSync)
+                      └─ mutate bucket
+                           └─ writeStatsAtomic()
+                                └─ writeFile(tmpPath)
+                                     └─ fsync(fd)          (via Bun's native fd)
+                                          └─ rename(tmp → stats.json)
+                                               └─ releaseLock()
+```
+
+Two serialization layers — the in-process mutex (a chained Promise) prevents concurrent async calls within one server process from racing; the filesystem lock extends that to the 12 servers and hooks that can run simultaneously. The rename is atomic at the OS level, so readers never see a partial write.
+
+### schemaVersion and migration
+
+`stats.json` carries `"schemaVersion": 2`. On load, `_stats.ts:readStats` checks the version and migrates forward if needed (v1 had a single global `session` field; v2 moves that to the per-session map). The migration is additive and non-destructive — old lifetime counters are preserved.
+
+---
+
+## 4. Hook Graph
+
+Hooks are declared in `hooks/hooks.json` and executed by the Claude Code harness. The file references below show where each hook lives.
+
+```
+Session opens
+    │
+    ▼
+SessionStart ──► hooks/session-start.ts
+    │              • Runs baseline scanner (project orientation)
+    │              • Calls initSessionBucket() in _stats.ts
+    │              • Emits session greeting to stderr
+    │
+    ▼  (for each tool call)
+PreToolUse  (matcher: "Read")  ──► hooks/pretooluse-read.sh
+PreToolUse  (matcher: "Grep")  ──► hooks/pretooluse-grep.sh
+PreToolUse  (matcher: "Edit")  ──► hooks/pretooluse-edit.sh
+    │
+    ▼
+  [ tool executes ]
+    │
+    ▼
+PostToolUse (matcher: Write|Edit|MultiEdit|Bash|mcp__ashlr-efficiency__*)
+    ├──► hooks/post-tool-use-genome.sh    (genome auto-propose)
+    └──► hooks/session-log-append.sh      (JSONL append)
+    │
+    ▼
+SessionEnd
+    ├──► hooks/session-end-consolidate.sh  (genome consolidation)
+    └──► hooks/session-end-stats-gc.ts     (drop session bucket, append summary to log)
+```
+
+PreToolUse hooks are matcher-filtered — Claude Code only fires them for the named tool. PostToolUse has a pipe-separated matcher covering both native tools and the ashlr MCP variants so both paths are logged.
+
+---
+
+## 5. Genome Lifecycle
+
+The genome is a per-project knowledge base stored under `.ashlrcode/genome/`. It powers genome-aware `ashlr__grep` routing and surfaces architectural context during sessions.
+
+**Init** — `scripts/genome-init.ts` (invoked by the `/ashlr-genome-init` skill). Creates the scaffold via `@ashlr/core-efficiency/genome:initGenome`, then writes three knowledge files: `knowledge/architecture.md` (baseline scanner output), `knowledge/conventions.md` (detected from config files), and `knowledge/decisions.md` (ADR-0000 placeholder).
+
+**Propose (edit-triggered)** — `hooks/post-tool-use-genome.sh` fires on every Write/Edit/MultiEdit/Bash call. It pipes the PostToolUse payload to `scripts/genome-auto-propose.ts`, which:
+1. Skips trivial tools via a whitelist.
+2. Regex-matches architecture/decision signals in the result text.
+3. Deduplicates by SHA-256 of the first 500 chars against a persisted set at `~/.ashlr/genome-proposals-seen.json` (capped at 10K entries).
+4. Walks up from `cwd` to find `.ashlrcode/genome/`.
+5. Appends a JSONL record to `proposals.jsonl` with the current generation number.
+
+**Consolidate (session-end or threshold)** — `hooks/session-end-consolidate.sh` runs at SessionEnd. It also fires mid-session when the proposal count crosses a threshold. Consolidation calls `ashlr__genome_consolidate` (via `servers/genome-server.ts`), which delegates to `@ashlr/core-efficiency/scribe.ts` to merge pending proposals into the genome files. If a local LLM is reachable it summarizes the diffs; otherwise it does a line-level merge. Progress is logged to `~/.ashlr/genome-consolidation.log`.
+
+---
+
+## 6. Status Line Rendering
+
+Claude Code calls the `statusLine.command` from `plugin.json` periodically and renders the first stdout line in its UI bar.
+
+Pipeline:
+
+```
+stats.json
+    └─ readCurrentSession(sessionId)        servers/_stats.ts
+         └─ buildStatusLine()               scripts/savings-status-line.ts
+              ├─ formatTokens(saved)        → "1.2K", "450K", "2.1M"
+              ├─ readDailyHistory()         → last-N-day savings array
+              ├─ renderSparkline(history)   scripts/ui-animation.ts:renderSparkline
+              │    └─ 16-rung Unicode bars (ASCII fallback for non-Unicode terminals)
+              ├─ renderGradient(sparkline)  scripts/ui-animation.ts:renderGradient
+              │    └─ truecolor sweep (single brand color fallback)
+              ├─ renderHeartbeat(pulse)     scripts/ui-animation.ts
+              └─ applyColor(line)           scripts/savings-status-line.ts
+```
+
+**Capability detection.** `scripts/savings-status-line.ts` reads terminal capability flags before rendering. Unicode glyphs are suppressed when the terminal can't display them. Color is suppressed when `NO_COLOR` is set or when the terminal reports no color support. Animation is suppressed when `ASHLR_STATUS_ANIMATE=0`.
+
+**Width budget.** The output target is 80 characters. `visibleWidth()` in `scripts/ui-animation.ts:visibleWidth` strips ANSI escapes and counts code points to measure rendered width, independent of color sequences. The status line truncates segments to stay within budget.
+
+**Settings toggles** (under `ashlr` key in `~/.claude/settings.json`):
+- `statusLine` — master on/off switch (default: true)
+- `statusLineSession` — show "session +N" segment
+- `statusLineLifetime` — show "lifetime +N" segment
+- `statusLineTips` — rotate a helpful tip at the tail
+
+---
+
+## 7. Session Log
+
+`~/.ashlr/session-log.jsonl` is an append-only JSONL file. Each line is a flat JSON record.
+
+**Append path** — `hooks/session-log-append.sh` fires PostToolUse. It uses `bun` to parse the hook payload and emit a structured record; falls back to a minimal bash-built record if bun is unavailable. Self-rotates at 10 MB to `session-log.jsonl.1`.
+
+**Record schema:**
+```json
+{ "ts": "ISO-8601", "agent": "claude-code", "event": "tool_call",
+  "tool": "ashlr__read", "cwd": "/abs/path", "session": "sess-id",
+  "input_size": 42, "output_size": 310 }
+```
+
+**Session-end summary** — `hooks/session-end-stats-gc.ts` appends one final record per session with `event: "session_end"` carrying `calls`, `tokens_saved`, and `started_at` from the bucket being dropped.
+
+**Planned events** — `tool_fallback` (LLM summarization fell back to snip-compact) and `tool_escalate` (agent escalated from haiku to sonnet) are reserved event types.
+
+**Aggregator** — `scripts/session-log-report.ts` reads the log (+ rotated `.1`) and produces a plain-text report covering top tools by call count, per-project breakdowns, 24h vs lifetime comparison, and recent session summaries. Exposed via the `/ashlr-usage` skill.
+
+---
+
+## 8. Summarization
+
+Source: `servers/_summarize.ts`.
+
+**When it fires.** Each tool that handles large output (read, grep, edit, bash, sql, diff) checks if the raw result exceeds ~2KB. If so it calls `summarize(content, toolName)`.
+
+**Local-first.** Default endpoint is `http://localhost:1234/v1` (LM Studio). Override via `ASHLR_LLM_URL` + `ASHLR_LLM_KEY` for cloud. Cloud only fires when explicitly set — the plugin has no account requirement and no telemetry.
+
+**Cache.** SHA-256 of the input is used as cache key. Cache files live at `~/.ashlr/summary-cache/<hash>.txt` with a 1-hour TTL. A cache hit costs zero tokens.
+
+**Fallback.** If the LLM endpoint is unreachable or times out (5s), `summarize` falls back to snipCompact truncation and appends `[LLM unreachable, fell back to truncation]` so the agent can see what happened. `bypassSummary: true` on any tool call skips LLM and snip-compacts directly.
+
+**Per-tool prompts.** `_summarize.ts:TOOL_PROMPTS` maps tool names to system prompts tuned for each output type: file contents preserve imports and signatures; bash preserves errors and final result lines; SQL preserves first/last rows and counts. Reading from the end of the file gives the full prompt set.
+
+---
+
+## 9. Adding a New MCP Server
+
+1. **Create `servers/foo-server.ts`** following the pattern in `servers/efficiency-server.ts`:
+   - Import `Server` from `@modelcontextprotocol/sdk/server/index.js`.
+   - Import `recordSaving` (and optionally `readCurrentSession`) from `./_stats`.
+   - Declare tools in the `ListToolsRequestSchema` handler.
+   - Handle calls in the `CallToolRequestSchema` handler with a `switch` on `name`.
+   - Call `await recordSaving(tokensEstimate, costEstimate, toolName, cwd)` after every successful call.
+   - Wrap the handler body in `try/catch`; return `{ content: [...], isError: true }` on error.
+   - End with `const transport = new StdioServerTransport(); await server.connect(transport);`.
+
+2. **Register in `.claude-plugin/plugin.json`** under `mcpServers`:
+   ```json
+   "ashlr-foo": {
+     "command": "bash",
+     "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-entrypoint.sh", "servers/foo-server.ts"]
+   }
+   ```
+
+3. **Write tests in `__tests__/foo-server.test.ts`**. Use `mkdtemp` for an isolated `HOME` so no test touches `~/.ashlr`. Spawn the real server process and speak JSON-RPC over stdio (see `__tests__/efficiency-server.test.ts` for the `rpc()` helper pattern).
+
+4. **Add to `CHANGELOG.md`** under the current version block.
+
+5. **Update this document** — add a row to the MCP server map in section 2.
+
+No other files need to change. The entrypoint script handles `bun install` automatically; no `package.json` edit is required unless you add a new npm dependency.
+
+---
+
+## 10. Testing Model
+
+Test runner: `bun test`. All test files live in `__tests__/`.
+
+**Isolation.** Every test suite that touches the filesystem creates a `mkdtemp` temp dir and passes it as `HOME` (or equivalent) to the code under test. No test reads or writes the real `~/.ashlr`. See `__tests__/session-log-report.test.ts:beforeEach` for the canonical pattern.
+
+**Integration tests.** `__tests__/efficiency-server.test.ts` spawns the real MCP server process and sends JSON-RPC requests over stdio. This catches wiring bugs that unit tests miss. The `rpc(reqs, env)` helper in that file is reusable for other server tests.
+
+**Fixture conventions.** Synthetic log/stats data is built inline as arrays of typed records, not from files on disk. This keeps tests hermetic and readable without fixture file management.
+
+**Special test groups:**
+- `__tests__/integration/` — multi-server or end-to-end scenarios.
+- `__tests__/quality/` — snapshot/regression tests for rendered output (savings report, status line).
+
+**Running:**
+```
+bun test                      # all tests
+bun test __tests__/foo.test.ts  # single file
+```
+
+Tests that require a live database are skipped automatically when `$TEST_DATABASE_URL` is absent.
+
+---
+
+## 11. Release Flow
+
+Script: `scripts/publish.sh`. Accepts `--dry-run`.
+
+Steps:
+1. Checks `gh auth status`.
+2. Creates the `ashlr-plugin` GitHub repo (public) if it doesn't exist, then pushes `main`.
+3. Optionally creates and pushes `@ashlr/core-efficiency` if the sibling repo exists locally.
+4. Enables GitHub Pages from `/docs` (POST then PUT — idempotent).
+
+Version bumping is manual: edit `plugin.json:version` and `CHANGELOG.md` before running the script. There is no automated semver bump. The `scripts/mcp-entrypoint.sh` reads the version from `plugin.json` to identify stale sibling cache dirs and clean them up.
+
+---
+
+## 12. Design Principles
+
+These are the non-obvious decisions baked into the codebase.
+
+**Local-first LLM, no telemetry.** The summarization helper calls `localhost:1234` by default. No data leaves the machine unless the user explicitly sets `ASHLR_LLM_URL`. There is no analytics, no error reporting endpoint, no call home.
+
+**Atomic stats writes.** A two-layer write protocol (in-process Promise chain + `O_EXCL` lockfile + `rename`) ensures that N concurrent MCP servers and hooks never corrupt `stats.json`. Any approach that just does `JSON.parse` → mutate → `writeFile` will lose updates under load. The lockfile spin is capped at 200ms; if it can't acquire, it skips the write rather than blocking the tool call.
+
+**Per-session accounting.** The old `stats.json` had a single global `session` field. With multiple Claude Code terminals open, every server clobbered each other's counter. v2 uses `CLAUDE_SESSION_ID` as a bucket key. The `mcp-entrypoint.sh` explicitly forwards this env var into every server subprocess.
+
+**Width-stable status line.** The status line must not reflow the UI on every refresh. `visibleWidth()` strips ANSI escapes before measuring. Segments are truncated (not wrapped) to stay within 80 chars. The sparkline always occupies the same number of columns regardless of savings magnitude.
+
+**Genome is fire-and-forget.** The auto-propose hook, the consolidation hook, and the genome server are all written to never throw and never block the agent. A genome write failure is invisible to the user. This is intentional — genome is an optimization layer, not a correctness requirement.
+
+**GC at session end.** Per-session buckets are dropped from `stats.json` when the session closes (`hooks/session-end-stats-gc.ts`). Lifetime counters are never dropped. This bounds `stats.json` size without losing the numbers that matter.

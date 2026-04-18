@@ -29,9 +29,10 @@ import { spawnSync } from "child_process";
 
 import { formatBaseline, scan } from "../scripts/baseline-scan";
 import { greet as sessionGreet } from "../scripts/session-greet";
+import { initSessionBucket } from "../servers/_stats";
 
 export const ACTIVATION_NOTICE =
-  "ashlr-plugin v0.6.0 active — 9 MCP tools incl. summarization. /ashlr:ashlr-doctor to verify, /ashlr-savings for totals.";
+  "ashlr-plugin v0.8.0 active — 13 MCP tools, per-session accounting, animated status line. /ashlr-allow to silence prompts, /ashlr-doctor to verify.";
 export const SCAN_BUDGET_MS = 2000;
 
 /**
@@ -264,6 +265,12 @@ async function main(): Promise<void> {
     // the JSON hook response on stdout.
     process.stderr.write(result.notice + "\n");
   }
+
+  // Initialize the per-session bucket in ~/.ashlr/stats.json. This sets
+  // `startedAt` for the current CLAUDE_SESSION_ID so `/ashlr-savings` can
+  // report "session started Nm ago" accurately. Fire-and-forget — a stats
+  // write never blocks the hook response.
+  try { await initSessionBucket(); } catch { /* stats is decoration */ }
 
   // Run the session-start greeting (first-run welcome / normal 1-liner /
   // weekly digest). Writes to stderr; swallows its own errors. We run this

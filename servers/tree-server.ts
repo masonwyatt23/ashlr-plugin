@@ -19,47 +19,12 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readdirSync, statSync, lstatSync, readFileSync } from "fs";
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join, resolve, relative, sep, basename } from "path";
+import { join, resolve, relative, sep, basename } from "path";
 import { spawnSync } from "child_process";
-
-// ---------------------------------------------------------------------------
-// Savings tracker (shared contract with efficiency-server.ts)
-// ---------------------------------------------------------------------------
-
-interface Stats {
-  session: { calls: number; tokensSaved: number };
-  lifetime: { calls: number; tokensSaved: number };
-}
-
-const STATS_PATH = join(homedir(), ".ashlr", "stats.json");
-const session: Stats["session"] = { calls: 0, tokensSaved: 0 };
-
-async function loadLifetime(): Promise<Stats["lifetime"]> {
-  if (!existsSync(STATS_PATH)) return { calls: 0, tokensSaved: 0 };
-  try {
-    const raw = JSON.parse(await readFile(STATS_PATH, "utf-8")) as Stats;
-    return raw.lifetime ?? { calls: 0, tokensSaved: 0 };
-  } catch {
-    return { calls: 0, tokensSaved: 0 };
-  }
-}
-
-async function persistStats(lifetime: Stats["lifetime"]): Promise<void> {
-  await mkdir(dirname(STATS_PATH), { recursive: true });
-  const payload: Stats = { session, lifetime };
-  await writeFile(STATS_PATH, JSON.stringify(payload, null, 2));
-}
+import { recordSaving as recordSavingCore } from "./_stats";
 
 async function recordSaving(baselineChars: number, compactChars: number): Promise<void> {
-  const saved = Math.max(0, Math.ceil((baselineChars - compactChars) / 4));
-  session.calls++;
-  session.tokensSaved += saved;
-  const lifetime = await loadLifetime();
-  lifetime.calls++;
-  lifetime.tokensSaved += saved;
-  await persistStats(lifetime);
+  await recordSavingCore(baselineChars, compactChars, "ashlr__tree");
 }
 
 // ---------------------------------------------------------------------------

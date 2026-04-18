@@ -111,6 +111,33 @@ Look for **`ashlr:code`** on the right side of the input field — that's the ba
 /ashlr-benchmark  # benchmark against your current project
 ```
 
+### Permissions (stop Claude Code prompting on every ashlr tool call)
+
+If your `~/.claude/settings.json` has `permissions.defaultMode: "bypassPermissions"` but you still
+see a prompt for every `mcp__ashlr-*` call, the allowlist is missing the ashlr entries.
+One command fixes it:
+
+```
+/ashlr-allow
+```
+
+That runs `scripts/install-permissions.ts`, which adds one wildcard per MCP server plus a
+catch-all to `permissions.allow`:
+
+```json
+"allow": [
+  "mcp__ashlr-efficiency__*",
+  "mcp__ashlr-bash__*",
+  "mcp__ashlr-sql__*",
+  "... (one per server)",
+  "mcp__ashlr-*"
+]
+```
+
+The installer is idempotent — safe to run again. Restart Claude Code (or `/reload-plugins`)
+after it runs. To undo: `bun run scripts/install-permissions.ts --remove`.
+`/ashlr-doctor` reports red on the `allowlist` line when the entries are missing.
+
 ### About the auto-install
 
 Since v0.3.0, the `SessionStart` hook detects a missing `node_modules/` and runs `bun install` transparently on first session load. Since v0.6.0, that same hook also removes stale plugin-version caches so old versions don't interfere with the current install.
