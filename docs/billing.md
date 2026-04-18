@@ -20,7 +20,7 @@ Users sign up and sign in through a passwordless magic-link flow:
 
 1. Visit `/signin` on the site and enter an email address.
 2. The backend creates a user record (if new) and sends a one-time link via
-   [Resend](https://resend.com). The link is valid for 15 minutes.
+   [SendGrid](https://sendgrid.com). The link is valid for 15 minutes.
 3. Clicking the link calls `POST /auth/verify`, which issues a permanent API
    token and stores it in the user's browser (`localStorage`). The token is
    used as a `Bearer` credential for all subsequent API calls.

@@ -22,9 +22,9 @@ Last reviewed: 2026-04-18
 - [ ] Confirm the 14-day refund window is noted in the Stripe portal configuration.
 - [ ] Confirm tax collection settings (automatic tax or manual) match the "exclusive of taxes" language in Terms section 5.
 
-### Resend
+### SendGrid
 
-- [ ] Verify the sending domain (`ashlr.ai`) in the Resend dashboard. Add SPF, DKIM, and DMARC records to DNS.
+- [ ] Verify the sending domain (`ashlr.ai`) in the SendGrid dashboard. Add SPF, DKIM, and DMARC records to DNS.
 - [x] `support@ashlr.ai` is the canonical contact email — referenced across privacy, terms, DPA, pricing, footer, docs, and docs/pro/*.
 - [ ] Set up transactional email templates: welcome / magic link, subscription receipt, renewal reminder, policy change notice (30-day lead).
 
@@ -36,7 +36,7 @@ If you sign enterprise customers, you will need countersigned DPAs with each sub
 - [ ] Neon — check their DPA availability at https://neon.tech/legal
 - [ ] Vercel — DPA available at https://vercel.com/legal/dpa
 - [ ] Stripe — DPA available at https://stripe.com/legal/dpa
-- [ ] Resend — confirm DPA availability
+- [ ] SendGrid — DPA at https://www.twilio.com/en-us/legal/data-protection-addendum (Twilio SendGrid)
 
 ### International
 

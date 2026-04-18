@@ -43,7 +43,7 @@ function getTargets(): ProbeTarget[] {
     { component: "api",              url: `${apiBase}/readyz`                  },
     { component: "llm-summarizer",   url: "https://api.anthropic.com",         anyNon5xxOk: true },
     { component: "stripe-billing",   url: "https://api.stripe.com/v1/health",  anyNon5xxOk: true },
-    { component: "email-delivery",   url: "https://api.resend.com",            anyNon5xxOk: true },
+    { component: "email-delivery",   url: "https://api.sendgrid.com",            anyNon5xxOk: true },
     { component: "docs",             url: `${docsBase}/`                       },
   ];
 }
@@ -85,7 +85,7 @@ async function probe(target: ProbeTarget): Promise<ProbeResult> {
       };
     }
 
-    // For opaque upstreams (Stripe, Resend, Anthropic) any non-5xx is "ok"
+    // For opaque upstreams (Stripe, SendGrid, Anthropic) any non-5xx is "ok"
     if (target.anyNon5xxOk || res.status < 400) {
       const status = latencyMs > 3_000 ? "degraded" : "ok";
       return { component: target.component, status, latencyMs, errorText: null };

@@ -233,7 +233,7 @@ describe("daily cap notification idempotency", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. TESTING=1 mode: no Resend call, HTML logged to stderr
+// 8. TESTING=1 mode: no SendGrid call, HTML logged to stderr
 // ---------------------------------------------------------------------------
 
 describe("sendEmail TESTING mode", () => {

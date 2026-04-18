@@ -10,7 +10,7 @@ Start a local preview server on port 3333:
 bun run server/src/emails/preview.ts
 ```
 
-Then open http://localhost:3333 to browse all templates. Each template is rendered with realistic sample data. The preview server does not require `RESEND_API_KEY`.
+Then open http://localhost:3333 to browse all templates. Each template is rendered with realistic sample data. The preview server does not require `SENDGRID_API_KEY`.
 
 Individual template URLs:
 
@@ -101,7 +101,7 @@ All sends go through `server/src/lib/email.ts`:
 await sendEmail("magic-link", { to: email, data: { email, link } });
 ```
 
-The function renders the React template to HTML + plain text, then calls Resend. If `RESEND_API_KEY` is unset or `TESTING=1`, it logs the rendered output to stderr instead.
+The function renders the React template to HTML + plain text, then calls SendGrid. If `SENDGRID_API_KEY` is unset or `TESTING=1`, it logs the rendered output to stderr instead.
 
 ## Email client compatibility notes
 
@@ -110,4 +110,4 @@ The function renders the React template to HTML + plain text, then calls Resend.
 - **Outlook (Windows)**: does not render SVG in `<img>` tags. The logo SVG is embedded inline (not via `<img src="...svg">`), which renders correctly in Gmail and Apple Mail. In Outlook on Windows the inline SVG is ignored; the `aria-label="ashlr"` on the SVG provides accessible fallback text.
 - **Apple Mail**: full support for inline SVG, web fonts, and CSS. All templates render as designed.
 - **Dark mode**: templates use a white card on parchment background. Email clients that invert colors in dark mode (Apple Mail, some Android clients) may adjust the outer background; the inner card remains readable due to explicit background-color declarations on all sections.
-- **Plain-text fallback**: every template exports a `plainText()` function. The Resend send includes both `html` and `text` fields, so clients that strip HTML receive the plain-text version.
+- **Plain-text fallback**: every template exports a `plainText()` function. The SendGrid send includes both `html` and `text` fields, so clients that strip HTML receive the plain-text version.

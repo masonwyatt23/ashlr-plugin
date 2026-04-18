@@ -2,6 +2,34 @@
 
 All notable changes to ashlr-plugin. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.8.2] — 2026-04-18
+
+**Email provider swap: Resend → SendGrid.** Matches the standard stack used across AshlrAI Inc's other projects.
+
+### Changed
+
+- **`server/src/lib/email.ts`** — SendGrid client (`@sendgrid/mail`) replaces the Resend SDK. Lazy init via `sgMail.setApiKey()`, `parseAddress()` helper turns `"ashlr <noreply@ashlr.ai>"` into SendGrid's `{ name, email }` shape. Error logging captures SendGrid's response body.
+- **`server/package.json`** — `resend` removed, `@sendgrid/mail@^8.1.6` added.
+- **`server/src/workers/health-check.ts`** — `email-delivery` component now probes `api.sendgrid.com` instead of `api.resend.com`.
+- **Environment variable renamed**: `RESEND_API_KEY` → `SENDGRID_API_KEY`. All references updated in `.env.example`, `docs/deploy.md`, `docs/billing.md`, `docs/email-templates.md`, `docs/legal.md`, `server/README.md`.
+- **Sub-processor table** in `/privacy` and `/dpa`: Resend → SendGrid (Twilio SendGrid Inc). DPA URL pointer in `docs/legal.md` updated to Twilio's data-protection-addendum page.
+
+### Launch impact
+
+Update the Fly.io secrets before first deploy:
+
+```
+flyctl secrets set SENDGRID_API_KEY=SG.xxxxx
+```
+
+Domain verification moves from the Resend dashboard to SendGrid's Sender Authentication flow. Same SPF/DKIM concepts; SendGrid's UI is different. Link in `docs/deploy.md` now points at SendGrid's docs.
+
+### Tests
+
+- **858 pass, 1 skip, 0 fail** (root).
+- **143 pass** (server) — `emails.test.ts` unchanged since the public API (`sendEmail(template, { to, data })`) is identical. Test-mode fallback behavior (logging to stderr when no API key) still works the same way.
+
+
 ## [1.8.1] — 2026-04-18
 
 **Entity-level launch config.** All placeholder copy replaced with real entity details.

@@ -1,29 +1,32 @@
 /**
- * email.ts — Central email dispatch via react-email + Resend.
+ * email.ts — Central email dispatch via react-email + SendGrid.
  *
  * Usage:
  *   await sendEmail("magic-link", { to: "user@example.com", data: { email, link } });
  *
- * In TESTING=1 or when RESEND_API_KEY is unset the rendered HTML is written to
- * stderr and no real send is attempted.  All errors are caught — this function
- * never throws.
+ * In TESTING=1 or when SENDGRID_API_KEY is unset the rendered HTML is written
+ * to stderr and no real send is attempted.  All errors are caught — this
+ * function never throws.
  */
 
 import { render } from "@react-email/render";
-import { Resend } from "resend";
+import sendgrid from "@sendgrid/mail";
 import * as React from "react";
 
 // ---------------------------------------------------------------------------
-// Lazy Resend client
+// Lazy SendGrid client (one-time init on first send)
 // ---------------------------------------------------------------------------
 
-let _resend: Resend | null = null;
+let _sendgridInitialized = false;
 
-function getResend(): Resend | null {
-  const key = process.env["RESEND_API_KEY"] ?? "";
-  if (!key) return null;
-  if (!_resend) _resend = new Resend(key);
-  return _resend;
+function ensureSendgrid(): boolean {
+  const key = process.env["SENDGRID_API_KEY"] ?? "";
+  if (!key) return false;
+  if (!_sendgridInitialized) {
+    sendgrid.setApiKey(key);
+    _sendgridInitialized = true;
+  }
+  return true;
 }
 
 function isTesting(): boolean {
@@ -165,10 +168,10 @@ export interface SendEmailOptions<T extends TemplateName> {
 }
 
 /**
- * Render a React email template and send it via Resend.
+ * Render a React email template and send it via SendGrid.
  *
  * Falls back to logging rendered HTML to stderr if:
- *   - RESEND_API_KEY is unset, OR
+ *   - SENDGRID_API_KEY is unset, OR
  *   - TESTING=1
  *
  * Never throws — all errors are caught and logged.
@@ -180,7 +183,7 @@ export async function sendEmail<T extends TemplateName>(
   try {
     const rendered = await renderTemplate(template, data);
 
-    if (isTesting() || !process.env["RESEND_API_KEY"]) {
+    if (isTesting() || !process.env["SENDGRID_API_KEY"]) {
       process.stderr.write(
         `[ashlr-email] TESTING send to=${to} subject="${rendered.subject}"\n` +
         `[ashlr-email] html length=${rendered.html.length}\n` +
@@ -189,18 +192,26 @@ export async function sendEmail<T extends TemplateName>(
       return;
     }
 
-    const resend = getResend()!;
-    const result = await resend.emails.send({
-      from,
-      to,
-      subject: rendered.subject,
-      html:    rendered.html,
-      text:    rendered.text,
-    });
+    if (!ensureSendgrid()) return;
 
-    if (result.error) {
+    // Parse `"ashlr <noreply@ashlr.ai>"` into SendGrid's {name, email} shape.
+    const fromAddr = parseAddress(from);
+
+    try {
+      await sendgrid.send({
+        from:    fromAddr,
+        to,
+        subject: rendered.subject,
+        html:    rendered.html,
+        text:    rendered.text,
+      });
+    } catch (sgErr) {
+      const err = sgErr as { code?: number; message?: string; response?: { body?: unknown } };
       process.stderr.write(
-        `[ashlr-email] Resend error for template=${template} to=${to}: ${JSON.stringify(result.error)}\n`,
+        `[ashlr-email] SendGrid error for template=${template} to=${to}: ` +
+        `code=${err.code ?? "?"} msg="${err.message ?? String(sgErr)}"` +
+        (err.response?.body ? ` body=${JSON.stringify(err.response.body)}` : "") +
+        `\n`,
       );
     }
   } catch (err) {
@@ -208,4 +219,18 @@ export async function sendEmail<T extends TemplateName>(
       `[ashlr-email] unexpected error for template=${template} to=${to}: ${String(err)}\n`,
     );
   }
+}
+
+/**
+ * Parse an RFC 5322-ish from-address string like `"ashlr <noreply@ashlr.ai>"`
+ * into SendGrid's `{ name, email }` shape. If the string is just a bare
+ * address it returns that as `email` with no `name`.
+ */
+function parseAddress(s: string): { name?: string; email: string } {
+  const m = /^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$/.exec(s);
+  if (m && m[2]) {
+    const name = (m[1] ?? "").trim();
+    return name ? { name, email: m[2] } : { email: m[2] };
+  }
+  return { email: s.trim() };
 }

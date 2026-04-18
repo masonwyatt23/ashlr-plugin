@@ -66,7 +66,7 @@ See `.env.example` for the full list with descriptions. Key variables:
 | `PORT` | `3001` | no | HTTP port |
 | `ASHLR_DB_PATH` | `./ashlr.db` | no | SQLite file path |
 | `FRONTEND_URL` | `https://plugin.ashlr.ai` | no | Base URL for magic links |
-| `RESEND_API_KEY` | — | prod | Email sending via Resend |
+| `SENDGRID_API_KEY` | — | prod | Email sending via SendGrid |
 | `STRIPE_SECRET_KEY` | — | prod | Stripe API key |
 | `STRIPE_WEBHOOK_SECRET` | — | prod | Stripe webhook verification |
 | `ANTHROPIC_API_KEY` | — | prod | Claude API access |
@@ -106,5 +106,5 @@ Set `SENTRY_DSN` to enable. Without it, Sentry is a complete no-op — no import
 **Fly.io**: `fly launch` from the `server/` directory. Mount a persistent volume at `/data` and set `ASHLR_DB_PATH=/data/ashlr.db`. The health check is configured to `/readyz` in `fly.toml`.
 
 ```bash
-fly secrets set SENTRY_DSN=https://... RESEND_API_KEY=re_... ANTHROPIC_API_KEY=sk-ant-...
+fly secrets set SENTRY_DSN=https://... SENDGRID_API_KEY=SG... ANTHROPIC_API_KEY=sk-ant-...
 ```
