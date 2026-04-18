@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 0 * * 1"  # every Monday UTC
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -60,3 +62,72 @@ jobs:
       - name: Run real-time counters smoke test
         run: bun run scripts/smoke-realtime.ts
         timeout-minutes: 2
+
+  # ---------------------------------------------------------------------------
+  # benchmark-check: on every push, verify the script still exits 0 (dry-run).
+  # Does not commit results — just guards against regressions in the runner.
+  # ---------------------------------------------------------------------------
+  benchmark-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+      - run: bun install
+      - name: Benchmark dry-run
+        run: bun run scripts/run-benchmark.ts --repo . --dry-run
+
+  # ---------------------------------------------------------------------------
+  # benchmark: weekly full run, commits updated JSON, opens a PR for review.
+  # Runs every Monday at 00:00 UTC.
+  # ---------------------------------------------------------------------------
+  benchmark:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: bun-${{ hashFiles('bun.lock') }}
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+      - run: bun install
+      - name: Run benchmark
+        run: bun run scripts/run-benchmark.ts --repo . --out docs/benchmarks-v2.json
+      - name: Open PR with updated benchmark data
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: weekly benchmark refresh"
+          branch: chore/weekly-benchmark-refresh
+          title: "chore: weekly benchmark refresh"
+          body: |
+            Automated weekly benchmark run.
+
+            Re-run locally with:
+            ```
+            bun run scripts/run-benchmark.ts --repo .
+            ```
+
+            Review the aggregate numbers in `docs/benchmarks-v2.json` before merging.
+          add-paths: docs/benchmarks-v2.json
+
+

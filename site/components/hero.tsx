@@ -33,7 +33,14 @@ const INSTALL_TABS = [
 
 type TabId = (typeof INSTALL_TABS)[number]["id"];
 
-export default function Hero() {
+interface HeroProps {
+  /** Overall mean token savings as a percentage string, e.g. "71.3".
+   *  Read from docs/benchmarks-v2.json at build time by the parent server
+   *  component. Falls back to "79.5" if the file is absent. */
+  savingsPct?: string;
+}
+
+export default function Hero({ savingsPct = "79.5" }: HeroProps) {
   const [inView, setInView] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>("claude");
   const ref = useRef<HTMLDivElement>(null);
@@ -94,8 +101,14 @@ export default function Hero() {
             fontVariationSettings: '"opsz" 36',
           }}
         >
-          Mean &minus;79.5% token savings on files&nbsp;&ge;&nbsp;2&nbsp;KB.
-          MIT-licensed. Zero telemetry.
+          Mean &minus;{savingsPct}% token savings on files&nbsp;&ge;&nbsp;2&nbsp;KB.{" "}
+          <a
+            href="/benchmarks"
+            style={{ color: "inherit", textDecoration: "underline", textDecorationStyle: "dotted", textUnderlineOffset: "3px" }}
+          >
+            Measured
+          </a>
+          . MIT-licensed. Zero telemetry.
         </p>
 
         {/* Live counter */}
