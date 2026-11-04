@@ -72,6 +72,15 @@
  *   - multiple matches on one line: all replaced, unrelated text unchanged
  *   - a literal repeated nonadjacently (same line and across lines) has
  *     every occurrence replaced while the intervening text stays identical
+ *   - adjacent literal runs — a back-to-back pair, then pairs and a
+ *     triple at line start, mid-line, before a newline and at EOF — are
+ *     each replaced once while near-misses and a match-free file stay
+ *     byte-identical
+ *   - a replacement that itself contains the literal lands exactly once
+ *     per match — the rewrite walk never rescans its own output — via
+ *     the tool handler and the pure applyRegex path
+ *   - a repeated-character literal matches non-overlapping
+ *     left-to-right, so an odd-length run leaves a one-char tail
  *   - anchored match at the beginning preserves the remaining text
  *   - unanchored literal match at offset 0 is replaced and the following
  *     text (CRLF, Unicode, prefix look-alikes, EOF tail) is preserved
@@ -1126,6 +1135,82 @@ describe("ashlr__search_replace_regex · apply", () => {
 
     const result = await ashlrSearchReplaceRegex(args);
     expect(result.text).toContain("1 file, 2 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
+  });
+
+  test("replaces every occurrence in adjacent literal runs at every boundary and keeps near-misses intact", async () => {
+    const file = join(tmpProj, "adjacent-runs.txt");
+    const untouched = join(tmpProj, "no-runs.txt");
+    // "tok" runs of two and three sit at line start, mid-line, right
+    // before a newline, and at EOF with no trailing newline — each match
+    // begins exactly where the previous one ended, so a walk that skips
+    // or double-steps a byte would drop or corrupt one. The near-misses
+    // on line 4 ("t-ok", "TOK", "to.k", "took", "tk") never contain the
+    // literal and must survive byte-for-byte, as must the CRLF and café.
+    const original =
+      "toktok head café\r\n" +
+      "solo tok mid toktoktok\n" +
+      "edge toktok\n" +
+      "t-ok TOK to.k took tk\n" +
+      "tail toktok";
+    const expected =
+      "ZZ head café\r\n" +
+      "solo Z mid ZZZ\n" +
+      "edge ZZ\n" +
+      "t-ok TOK to.k took tk\n" +
+      "tail ZZ";
+    const other = "café\r\nnothing to rewrite\n";
+    await writeFile(file, original);
+    await writeFile(untouched, other);
+
+    const args = { pattern: "tok", replacement: "Z" };
+    const dryRun = await ashlrSearchReplaceRegex({ ...args, dryRun: true });
+    expect(dryRun.text).toContain("1 file, 10 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(original, "utf-8"));
+
+    const result = await ashlrSearchReplaceRegex(args);
+    expect(result.text).toContain("1 file, 10 replacements");
+    expect(result.originalBytes).toBe(Buffer.byteLength(original, "utf-8"));
+    expect(result.newBytes).toBe(Buffer.byteLength(expected, "utf-8"));
+
+    const after = await readFile(file, "utf-8");
+    expect(after).toBe(expected);
+    expect(after).not.toContain("tok");
+
+    // Assert each line individually so a mangled near-miss can't hide
+    // inside a whole-file comparison.
+    const lines = after.split("\n");
+    expect(lines[0]).toBe("ZZ head café\r");
+    expect(lines[1]).toBe("solo Z mid ZZZ");
+    expect(lines[2]).toBe("edge ZZ");
+    expect(lines[3]).toBe("t-ok TOK to.k took tk");
+    expect(lines[4]).toBe("tail ZZ");
+
+    expect(await readFile(untouched)).toEqual(Buffer.from(other, "utf-8"));
+  });
+
+  test("tool writes a replacement containing the literal exactly once per adjacent match", async () => {
+    const file = join(tmpProj, "self-match.txt");
+    // The replacement "ha!" itself starts with the literal "ha". A walk
+    // that rescanned emitted output would re-match forever ("ha!" →
+    // "ha!!" → …); the exec walk consumes only the original source, so
+    // each adjacent match is rewritten exactly once and the unrelated
+    // " x " and "." separators survive.
+    const original = "haha x hahaha ha.";
+    const expected = "ha!ha! x ha!ha!ha! ha!.";
+    await writeFile(file, original);
+
+    const tool = getTool("ashlr__search_replace_regex");
+    expect(tool).toBeDefined();
+    const args = { pattern: "ha", replacement: "ha!", roots: [file] };
+    const dryRun = await tool!.handler({ ...args, dryRun: true }, { env: {} });
+    expect(dryRun.isError).not.toBe(true);
+    expect(dryRun.content[0]?.text).toContain("1 file, 6 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(original, "utf-8"));
+
+    const result = await tool!.handler(args, { env: {} });
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]?.text).toContain("1 file, 6 replacements");
     expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
   });
 
@@ -2672,5 +2757,24 @@ describe("applyRegex · pure transformation", () => {
     expect(count).toBe(2);
     expect(capped).toBe(false);
     expect(updated).toBe("a  b  c\n");
+  });
+
+  test("replaces adjacent non-overlapping matches left-to-right", () => {
+    // /aa/g consumes two chars per match: "aa" is one match, "aaa" is a
+    // match plus a leftover char, "aaaa" is two fully adjacent matches.
+    // An overlapping scan would count 10 here; the exec walk reports 6.
+    const { updated, count, capped } = applyRegex("aa aaa aaaa aaaaa b\n", /aa/g, "X", 100);
+    expect(count).toBe(6);
+    expect(capped).toBe(false);
+    expect(updated).toBe("X Xa XX XXa b\n");
+  });
+
+  test("emits a replacement containing the match text exactly once per adjacent match", () => {
+    // The exec walk reads only the original source, so the "ha!" written
+    // for one match is never rescanned for the next — no "ha!!" cascade.
+    const { updated, count, capped } = applyRegex("haha", /ha/g, "ha!", 100);
+    expect(count).toBe(2);
+    expect(capped).toBe(false);
+    expect(updated).toBe("ha!ha!");
   });
 });
