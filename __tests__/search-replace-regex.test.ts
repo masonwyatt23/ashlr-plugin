@@ -240,6 +240,31 @@ describe("ashlr__search_replace_regex · apply", () => {
     expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
   });
 
+  test("replaces a literal match at the very end of the file and leaves the preceding content unchanged", async () => {
+    const file = join(tmpProj, "end.txt");
+    // The literal is the last thing in the file (no trailing newline). The
+    // earlier near-misses ("tail" inside "tailor", "tails") must survive, as
+    // must the CRLF/café prefix.
+    const prefix = "keep café\r\ntailor stays\ntails too\nlast word: ";
+    const original = prefix + "tail";
+    const expected = prefix + "END";
+    await writeFile(file, original);
+
+    // Anchor to the end so only the trailing occurrence matches.
+    const args = { pattern: "tail$", replacement: "END", roots: [file] };
+    const dryRun = await ashlrSearchReplaceRegex({ ...args, dryRun: true });
+    expect(dryRun.text).toContain("1 file, 1 replacement");
+    expect(await readFile(file)).toEqual(Buffer.from(original, "utf-8"));
+
+    const result = await ashlrSearchReplaceRegex(args);
+    expect(result.text).toContain("1 file, 1 replacement");
+    expect(result.originalBytes).toBe(Buffer.byteLength(original, "utf-8"));
+    expect(result.newBytes).toBe(Buffer.byteLength(expected, "utf-8"));
+    const after = await readFile(file);
+    expect(after).toEqual(Buffer.from(expected, "utf-8"));
+    expect(after.subarray(0, Buffer.byteLength(prefix, "utf-8"))).toEqual(Buffer.from(prefix, "utf-8"));
+  });
+
   test("m-flag `^…$` line anchor rewrites only fully matching lines", async () => {
     const file = join(tmpProj, "anchored.txt");
     // Only lines whose ENTIRE content is `version=<digits>` match under
@@ -2494,6 +2519,13 @@ describe("applyRegex · pure transformation", () => {
     const result = applyRegex(original, /replace me/g, "done", 100);
 
     expect(result).toEqual({ updated: original, count: 0, capped: false });
+  });
+
+  test("replaces a literal match at the very end of the text and keeps the preceding content", () => {
+    const { updated, count, capped } = applyRegex("tailor café\r\nx tail", /tail$/g, "END", 100);
+    expect(count).toBe(1);
+    expect(capped).toBe(false);
+    expect(updated).toBe("tailor café\r\nx END");
   });
 
   test("does not report a cap hit when all matches fit exactly", () => {
