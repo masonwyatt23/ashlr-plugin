@@ -72,6 +72,8 @@
  *   - multiple matches on one line: all replaced, unrelated text unchanged
  *   - a literal repeated nonadjacently (same line and across lines) has
  *     every occurrence replaced while the intervening text stays identical
+ *   - applyRegex: separated literal matches are each replaced with the
+ *     intervening text unchanged, with and without the per-file cap
  *   - anchored match at the beginning preserves the remaining text
  *   - unanchored literal match at offset 0 is replaced and the following
  *     text (CRLF, Unicode, prefix look-alikes, EOF tail) is preserved
@@ -2631,6 +2633,26 @@ describe("applyRegex · pure transformation", () => {
     expect(count).toBe(1);
     expect(updated).toBe("x 	 y");
     expect(updated.includes("	")).toBe(true);
+  });
+
+  test("separated literal matches are each replaced and the intervening text is unchanged", () => {
+    // "a.b" is a plain literal (escaped dots); the gaps hold near-misses
+    // ("axb", "A.B") that must survive byte-for-byte, as must CRLF/café.
+    const gaps = [" axb ", " A.B café\r\n", "\n-- a,b --\n"];
+    const input = `a.b${gaps[0]}a.b${gaps[1]}a.b${gaps[2]}a.b`;
+    const { updated, count, capped } = applyRegex(input, /a\.b/g, "<$&!>", 100);
+    expect(count).toBe(4);
+    expect(capped).toBe(false);
+    expect(updated).toBe(`<a.b!>${gaps[0]}<a.b!>${gaps[1]}<a.b!>${gaps[2]}<a.b!>`);
+    // Strip the replacements back out: only the untouched gaps remain.
+    expect(updated.split("<a.b!>")).toEqual(["", gaps[0], gaps[1], gaps[2], ""]);
+  });
+
+  test("separated literal matches past the cap leave the later matches and gaps in place", () => {
+    const { updated, count, capped } = applyRegex("id-7 x id-7 y id-7 z id-7", /id-7/g, "N", 2);
+    expect(count).toBe(2);
+    expect(capped).toBe(true);
+    expect(updated).toBe("N x N y id-7 z id-7");
   });
 
   test("empty replacement deletes each match and keeps the text between them", () => {
