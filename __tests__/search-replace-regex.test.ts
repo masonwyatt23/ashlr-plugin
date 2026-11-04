@@ -54,6 +54,13 @@
  *   - a literal stacking `{n,m}` braces, a `[x]` class, `?` and `.` is
  *     replaced in full while look-alikes matching the unescaped reading
  *     stay byte-identical, via the direct call and the tool handler
+ *   - a literal `{token}` brace placeholder is replaced only where the
+ *     exact brace-wrapped text stands — the inner span of a doubled
+ *     `{{token}}` included — while spaced, half-open, bracket, off-case
+ *     and fullwidth look-alikes stay byte-identical, via the direct
+ *     call, the `[{]…[}]` class spelling, the pure applyRegex path and
+ *     the tool handler; the unescaped `{token}` spelling is refused
+ *     because rg rejects a `{` that opens no numeric repetition
  *   - a bare `\.` replaces only literal periods; any other character
  *     (letters, digits, punctuation, Unicode) and dot-free files stay
  *     byte-identical, via the direct call and the tool handler
@@ -1489,6 +1496,101 @@ describe("ashlr__search_replace_regex · apply", () => {
     const viaTool = await tool!.handler({ ...args, roots: [file] }, { env: {} });
     expect(viaTool.isError).not.toBe(true);
     expect(viaTool.content[0]?.text).toContain("1 file, 2 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
+  });
+
+  test("a literal brace placeholder replaces only the exact {token} text, leaving brace look-alikes untouched", async () => {
+    const file = join(tmpProj, "braces.txt");
+    const lookalikes = join(tmpProj, "brace-lookalikes.txt");
+    // The intended match is the literal "{token}" — a brace-wrapped
+    // placeholder written `\{token\}` so each brace is itself. The
+    // escapes are load-bearing: JS compiles a bare "{token}" as an
+    // Annex-B literal, but rg's parser refuses a `{` that opens no
+    // numeric repetition, so the unescaped spelling never reaches
+    // files (asserted below). Every other brace shape is a near-miss
+    // that must survive byte-for-byte: "{tok3n}" (different interior),
+    // "{TOKEN}" (off-case — matching is case-sensitive by default),
+    // "(token)" and "[token]" (different bracket pairs), "{ token }"
+    // (spaces inside), "｛token｝" (fullwidth braces U+FF5B/U+FF5D —
+    // different code points), plus half-open "{token" and "token}".
+    // "{{token}}" DOES contain the literal once, at offset 1 — the
+    // substring match literal semantics demands — so it rewrites to
+    // "{R}". The literal also recurs at a line start after CRLF and at
+    // EOF with no trailing newline. The second file holds only
+    // look-alikes, so it never enters the candidate set at all.
+    const original =
+      "{token} keep café\r\n" +
+      "{tok3n} {TOKEN} (token) [token] { token } ｛token｝\n" +
+      "{{token}} mid\n" +
+      "open {token close token} tail\n" +
+      "last {token}";
+    const expected =
+      "R keep café\r\n" +
+      "{tok3n} {TOKEN} (token) [token] { token } ｛token｝\n" +
+      "{R} mid\n" +
+      "open {token close token} tail\n" +
+      "last R";
+    const lookalikeBytes = Buffer.from(
+      "｛token｝ {tok3n} (token) [token] {token café\r\n",
+      "utf-8",
+    );
+    await writeFile(file, original);
+    await writeFile(lookalikes, lookalikeBytes);
+
+    const args = { pattern: "\\{token\\}", replacement: "R" };
+    const dryRun = await ashlrSearchReplaceRegex({ ...args, dryRun: true });
+    expect(dryRun.text).toContain("1 file, 3 replacements");
+    // The look-alike file must not even surface as a skipped candidate.
+    expect(dryRun.text).not.toContain("skipped");
+    expect(await readFile(file)).toEqual(Buffer.from(original, "utf-8"));
+    expect(await readFile(lookalikes)).toEqual(lookalikeBytes);
+
+    const result = await ashlrSearchReplaceRegex(args);
+    expect(result.text).toContain("1 file, 3 replacements");
+    expect(result.originalBytes).toBe(Buffer.byteLength(original, "utf-8"));
+    expect(result.newBytes).toBe(Buffer.byteLength(expected, "utf-8"));
+    expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
+    expect(await readFile(lookalikes)).toEqual(lookalikeBytes);
+
+    // Assert each line individually so a mangled look-alike can't hide
+    // inside a whole-file comparison.
+    const lines = (await readFile(file, "utf-8")).split("\n");
+    expect(lines[0]).toBe("R keep café\r");
+    expect(lines[1]).toBe("{tok3n} {TOKEN} (token) [token] { token } ｛token｝");
+    expect(lines[2]).toBe("{R} mid");
+    expect(lines[3]).toBe("open {token close token} tail");
+    expect(lines[4]).toBe("last R");
+
+    // The class spelling `[{]token[}]` matches the same three spans.
+    await writeFile(file, original);
+    const viaClass = await ashlrSearchReplaceRegex({ ...args, pattern: "[{]token[}]" });
+    expect(viaClass.text).toContain("1 file, 3 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
+
+    // The pure in-memory transform replaces the same three spans.
+    const { updated, count } = applyRegex(original, /\{token\}/g, "R", 100);
+    expect(count).toBe(3);
+    expect(updated).toBe(expected);
+
+    // Same through the tool handler (JSON args path) — the escaped
+    // braces must survive transport and still match literally.
+    await writeFile(file, original);
+    const tool = getTool("ashlr__search_replace_regex");
+    expect(tool).toBeDefined();
+    const viaTool = await tool!.handler(args, { env: {} });
+    expect(viaTool.isError).not.toBe(true);
+    expect(viaTool.content[0]?.text).toContain("1 file, 3 replacements");
+    expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
+
+    // The unescaped "{token}" spelling is refused before any write:
+    // rg exits 2 on a `{` that opens no numeric repetition, so the
+    // plan reports the discovery failure and every byte stays put —
+    // a literal brace search must be written with escaped braces.
+    const res = await planSearchReplaceRegex({ ...args, pattern: "{token}" });
+    expect(res.ok).toBe(false);
+    await expect(
+      ashlrSearchReplaceRegex({ ...args, pattern: "{token}" }),
+    ).rejects.toThrow(/ripgrep failed to scan/);
     expect(await readFile(file)).toEqual(Buffer.from(expected, "utf-8"));
   });
 });
