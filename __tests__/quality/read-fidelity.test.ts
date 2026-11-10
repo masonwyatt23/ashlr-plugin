@@ -1159,6 +1159,41 @@ describe("PROMPTS.read — load-bearing marker contract", () => {
     );
   });
 
+  test("requests line numbers for every preserved item kind, not only markers", () => {
+    // "Preserve VERBATIM with line numbers:" must appear exactly once and
+    // scope over the whole enumeration: @-decorators, marker alternation,
+    // and top-level exports. A line-number request that only covered the
+    // marker alternation would leave decorators and exports unlocatable.
+    const clause =
+      /Preserve VERBATIM with line numbers:([\s\S]*?Do not invent markers)/;
+    const match = prompt.match(clause);
+    expect(match).not.toBeNull();
+    const items = match![1];
+    expect(items).toContain("@-prefixed decorator or annotation");
+    expect(items).toMatch(/every (?:[A-Z-]+\|)*TODO(?:\|[A-Z-]+)* marker;/);
+    expect(items).toContain("every top-level export/module.exports/__all__ statement");
+    // The line-number request must not be repeated as a passing mention or
+    // split so it covers only part of the enumeration.
+    expect(prompt.match(/with line numbers/g)).toHaveLength(1);
+    expect(items).not.toContain("with line numbers");
+
+    // Dropping the instruction must invalidate every marker contract, not
+    // just one — the phrase is load-bearing for the whole clause.
+    const unnumbered = prompt.replace("with line numbers", "");
+    expect(unnumbered).not.toBe(prompt);
+    for (const contract of [
+      xxxContract,
+      hackContract,
+      noteContract,
+      deprecatedContract,
+      warningContract,
+      threadUnsafeContract,
+      safetyContract,
+    ]) {
+      expect(unnumbered).not.toMatch(contract);
+    }
+  });
+
   test("stays within 800 chars", () => {
     // Keep the prompt tight so it doesn't inflate LLM context cost
     expect(prompt.length).toBeLessThanOrEqual(800);
