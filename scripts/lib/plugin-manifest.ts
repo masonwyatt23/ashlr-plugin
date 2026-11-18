@@ -10,6 +10,10 @@ export interface PluginManifest {
   skills: ManifestEntry[];
 }
 
+// Typed via globalThis so the site's Next typecheck (no @types/bun) accepts this shared file.
+const parseYaml = (text: string): unknown =>
+  (globalThis as unknown as { Bun: { YAML: { parse(text: string): unknown } } }).Bun.YAML.parse(text);
+
 /** Read shipped instructions only; discovery never runs them. */
 export function readManifestEntries(root: string, directory: "commands" | "skills"): ManifestEntry[] {
   const entries = readdirSync(join(root, directory), { withFileTypes: true });
@@ -20,7 +24,7 @@ export function readManifestEntries(root: string, directory: "commands" | "skill
       const source = readFileSync(join(root, path), "utf8");
       const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source)?.[1];
       let meta: { name?: unknown; description?: unknown } | null = null;
-      try { meta = frontmatter ? Bun.YAML.parse(frontmatter) as { name?: unknown; description?: unknown } : null; } catch { /* reject below */ }
+      try { meta = frontmatter ? parseYaml(frontmatter) as { name?: unknown; description?: unknown } : null; } catch { /* reject below */ }
       const expected = directory === "commands" ? file.slice(0, -3) : file;
       if (meta?.name !== expected || typeof meta.description !== "string" || !meta.description.trim()) {
         throw new Error(`Invalid instruction metadata: ${path}`);
