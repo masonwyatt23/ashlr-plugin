@@ -224,8 +224,8 @@ describe("ashlr__pipe · handler error isolation", () => {
       const multiFileText: string = multiFileDirect.result.content[0].text;
       // Filesystem traversal order is unspecified; each path must retain its own match.
       expect(multiFileText.split("\n").filter(line => line.includes("needle")).sort()).toEqual([
-        `${firstFile}:2:needle first file: complete text`,
-        `${secondFile}:1:needle second file: complete text`,
+        `${firstFile.replaceAll("\\", "/")}:2:needle first file: complete text`,
+        `${secondFile.replaceAll("\\", "/")}:1:needle second file: complete text`,
       ].sort());
       expect(multiFileText).not.toContain("unmatched.txt");
 
@@ -273,7 +273,9 @@ let home: string;
 let snap: ReturnType<typeof __snapshotRegistryForTests>;
 
 beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), "ashlr-pipe-test-"));
+  // Canonicalize before allow-listing: Windows temp paths may use RUNNER~1,
+  // while realpath() on the nested grep fixture expands it to runneradmin.
+  home = await realpath(await mkdtemp(join(tmpdir(), "ashlr-pipe-test-")));
   snap = __snapshotRegistryForTests();
 });
 
